@@ -692,7 +692,9 @@ tcp_recv_success(dns_dispatch_t *disp, isc_region_t *region,
 
 	dns_dispentry_t *resp = cds_lfht_entry(cds_lfht_iter_get_node(&iter),
 					       dns_dispentry_t, ht_node);
-	if (resp != NULL) {
+
+	/* Skip responses that are not ours */
+	if (resp != NULL && resp->disp == disp) {
 		if (!resp->reading) {
 			/*
 			 * We already got a message for this QID and weren't
@@ -1433,6 +1435,7 @@ dns_dispatch_add(dns_dispatch_t *disp, isc_loop_t *loop,
 	dns_dispentry_t *resp = isc_mem_get(disp->mctx, sizeof(*resp));
 	*resp = (dns_dispentry_t){
 		.timeout = timeout,
+		.port = localport,
 		.peer = *dest,
 		.loop = loop,
 		.connected = connected,

@@ -812,13 +812,16 @@ what messages to print.
    :short: Specifies the time format for log messages.
 
    :any:`print-time` can be set to ``yes``, ``no``, or a time format
-   specifier, which may be one of ``local``, ``iso8601``, or
-   ``iso8601-utc``. If set to ``no``, the date and time are not
-   logged. If set to ``yes`` or ``local``, the date and time are logged in
-   a human-readable format, using the local time zone. If set to
-   ``iso8601``, the local time is logged in ISO 8601 format. If set to
+   specifier, which may be one of ``local``, ``iso8601``, ``iso8601-utc``
+   or ``iso8601-tzinfo``.  If set to ``no``, the date and time are
+   not logged. If set to ``yes`` or ``local``, the date and time are
+   logged in a human-readable format, using the local time zone. If
+   set to ``iso8601``, the local time is logged in ISO 8601 format,
+   but no timezone information is included in the timestamp.  If set to
    ``iso8601-utc``, the date and time are logged in ISO 8601 format,
-   with time zone set to UTC. The default is ``no``.
+   with time zone set to UTC. If set to ``iso8601-tzinfo``, the local
+   time is logged in ISO 8601 format, with timezone information included
+   at the end of the timestamp. The default is ``no``.
 
    :any:`print-time` may be specified for a :any:`syslog` channel, but it is
    usually pointless since :any:`syslog` also logs the date and time.
@@ -6457,6 +6460,10 @@ keys
 
     This indicates the validity period of an RRSIG record (subject to
     inception offset and jitter). The default is ``P2W`` (2 weeks).
+
+    The :any:`signatures-validity` should be at least several multiples
+    of the SOA expire interval, to allow for reasonable interaction between
+    the various timer and expiry dates.
 
 .. namedconf:statement:: signatures-validity-dnskey
    :tags: dnssec
