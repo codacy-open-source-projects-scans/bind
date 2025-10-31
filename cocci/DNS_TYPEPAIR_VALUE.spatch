@@ -1,0 +1,6 @@
+@replacement@
+expression e;
+@@
+-DNS_TYPEPAIR_VALUE(dns_rdatatype_rrsig,
++DNS_SIGTYPEPAIR(
+             e)

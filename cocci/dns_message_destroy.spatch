@@ -1,0 +1,6 @@
+@renaming@
+expression e;
+@@
+-dns_message_destroy
++dns_message_detach
+                   (e);

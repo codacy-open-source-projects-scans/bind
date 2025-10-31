@@ -1,0 +1,35 @@
+@deletion@
+statement S;
+expression V;
+@@
+(
+-V =
+(    dns_message_gettempname
+|    dns_message_gettemprdata
+|    dns_message_gettemprdataset
+|    dns_message_gettemprdatalist
+)
+     (...);
+(
+-if (V != ISC_R_SUCCESS) S
+|
+(
+-check_result(V, ...)
+|
+-CHECK(..., V)
+);
+)
+|
+(
+-CHECK
+|
+-RETERR
+)
+-(
+( dns_message_gettempname
+| dns_message_gettemprdata
+| dns_message_gettemprdataset
+| dns_message_gettemprdatalist
+)
+-)
+)

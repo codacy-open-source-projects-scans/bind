@@ -1,0 +1,7 @@
+@deletion@
+expression C, M;
+@@
+ dns_rbtnodechain_init(C
+-                      , M
+                      );
+

@@ -1,0 +1,23 @@
+@add_cast@
+char T;
+@@
+(isalnum
+|isalpha
+|iscntrl
+|isdigit
+|isgraph
+|islower
+|isprint
+|ispunct
+|isspace
+|isupper
+|isxdigit
+|isascii
+|isblank
+|tolower
+|toupper
+)
+ (
++(unsigned char)
+ T
+ )
