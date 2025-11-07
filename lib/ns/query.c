@@ -951,7 +951,7 @@ ns_query_init(ns_client_t *client) {
 
 	/*
 	 * This mutex is destroyed when the client is destroyed in
-	 * exit_check().
+	 * ns__client_put_cb().
 	 */
 	isc_mutex_init(&client->query.fetchlock);
 	client->query.redirect.fname =
@@ -1250,6 +1250,11 @@ query_getzonedb(ns_client_t *client, const dns_name_t *name,
 		partial = true;
 	}
 	if (result == ISC_R_SUCCESS || result == DNS_R_PARTIALMATCH) {
+		if (dns_zone_isexpired(zone)) {
+			result = DNS_R_EXPIRED;
+			goto fail;
+		}
+
 		result = dns_zone_getdb(zone, &db);
 	}
 
@@ -5278,12 +5283,13 @@ query_trace(query_ctx_t *qctx) {
 
 	snprintf(mbuf, sizeof(mbuf) - 1,
 		 "client attr:0x%x, query attr:0x%X, restarts:%u, "
-		 "origqname:%s, timer:%d, authdb:%d, referral:%d",
+		 "origqname:%s, timer:%d, authdb:%d, referral:%d, id:%hu",
 		 qctx->client->inner.attributes, qctx->client->query.attributes,
 		 qctx->client->query.restarts, qbuf,
 		 (int)qctx->client->query.timerset,
 		 (int)qctx->client->query.authdbset,
-		 (int)qctx->client->query.isreferral);
+		 (int)qctx->client->query.isreferral,
+		 qctx->client->message->id);
 	CCTRACE(ISC_LOG_DEBUG(3), mbuf);
 #else  /* ifdef WANT_QUERYTRACE */
 	UNUSED(qctx);
@@ -5630,8 +5636,19 @@ ns__query_start(query_ctx_t *qctx) {
 				QUERY_ERROR(qctx, DNS_R_REFUSED);
 			}
 		} else {
+			const char *edemsg = NULL;
+
 			CCTRACE(ISC_LOG_ERROR, "ns__query_start: query_getdb "
 					       "failed");
+
+			if (result == DNS_R_NOTLOADED) {
+				edemsg = "zone not loaded";
+			} else if (result == DNS_R_EXPIRED) {
+				edemsg = "zone expired";
+			}
+			dns_ede_add(&qctx->client->edectx, DNS_EDE_INVALIDDATA,
+				    edemsg);
+
 			QUERY_ERROR(qctx, result);
 		}
 		return ns_query_done(qctx);

@@ -280,6 +280,15 @@ dns_zone_getorigin(dns_zone_t *zone);
  *\li	'zone' to be a valid zone.
  */
 
+dns_rdataclass_t
+dns_zone_getrdclass(dns_zone_t *zone);
+/*%<
+ *	Returns the value of the rdclass.
+ *
+ * Require:
+ *\li	'zone' to be a valid zone.
+ */
+
 void
 dns_zone_setfile(dns_zone_t *zone, const char *file, const char *initial_file,
 		 dns_masterformat_t format, const dns_master_style_t *style);
@@ -581,17 +590,6 @@ dns_zone_markdirty(dns_zone_t *zone);
  *	Mark a zone as 'dirty'.
  *
  * Require:
- *\li	'zone' to be a valid zone.
- */
-
-void
-dns_zone_expire(dns_zone_t *zone);
-/*%<
- *	Mark the zone as expired.  If the zone requires dumping cause it to
- *	be initiated.  Set the refresh and retry intervals to there default
- *	values and unload the zone.
- *
- * Require
  *\li	'zone' to be a valid zone.
  */
 
@@ -965,19 +963,6 @@ dns_zone_setxfracl(dns_zone_t *zone, dns_acl_t *acl);
  * Require:
  *\li	'zone' to be a valid zone.
  *\li	'acl' to be valid acl.
- */
-
-dns_acl_t *
-dns_zone_getnotifyacl(dns_zone_t *zone);
-/*%<
- * 	Returns the current notify acl or NULL.
- *
- * Require:
- *\li	'zone' to be a valid zone.
- *
- * Returns:
- *\li	acl a pointer to the acl.
- *\li	NULL
  */
 
 dns_acl_t *
@@ -2794,6 +2779,15 @@ dns_zone_getcfg(dns_zone_t *zone);
  *
  * Requires:
  * \li	'zone' to be a valid zone.
+ */
+
+bool
+dns_zone_isexpired(dns_zone_t *zone);
+/*%<
+ * Return true if a (secondary, mirror, etc.) zone is expired
+ *
+ * Requires:
+ * \li  'zone\ to be a valid zone.
  */
 
 #if DNS_ZONE_TRACE

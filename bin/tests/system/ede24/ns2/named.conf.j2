@@ -12,17 +12,17 @@
  */
 
 options {
-	query-source address 10.53.0.2;
-	notify-source 10.53.0.2;
+	listen-on port @PORT@ { 10.53.0.2; };
 	transfer-source 10.53.0.2;
-	port @PORT@;
 	pid-file "named.pid";
-	listen-on { 10.53.0.2; };
-	listen-on-v6 { none; };
-	allow-transfer { any; };
 	recursion no;
-	dnssec-validation no;
-	notify no;
+};
+
+zone "foo.fr" {
+	min-refresh-time 1;
+	min-retry-time 1;
+	type secondary;
+	primaries { 10.53.0.1 port @PORT@; };
 };
 
 key rndc_key {
@@ -33,5 +33,3 @@ key rndc_key {
 controls {
 	inet 10.53.0.2 port @CONTROLPORT@ allow { any; } keys { rndc_key; };
 };
-
-include "zones.conf";

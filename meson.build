@@ -12,7 +12,7 @@
 project(
     'bind',
     ['c'],
-    version: '9.21.15-dev',
+    version: '9.21.16-dev',
     meson_version: '>=1.3.0',
     license: 'MPL-2.0',
     default_options: {
@@ -655,6 +655,13 @@ if not cc.has_members('struct msghdr', '__pad1', '__pad2', prefix: '#include <sy
     endif
 else
     message('likely non-glibc on linux, disabling recvmmsg')
+endif
+
+## detect reuseport
+if cc.has_header_symbol('sys/socket.h', 'SO_REUSEPORT') and host_machine.system() == 'linux'
+    config.set('HAVE_SO_REUSEPORT_LB', 1)
+elif cc.has_header_symbol('sys/socket.h', 'SO_REUSEPORT_LB')
+    config.set('HAVE_SO_REUSEPORT_LB', 1)
 endif
 
 ## userspace-rcu
