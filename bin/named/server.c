@@ -312,11 +312,13 @@ typedef isc_result_t (*nzfwriter_t)(const cfg_obj_t *config, dns_view_t *view);
  * Uses the isc_refcount structure to count the number of views
  * with pending zone loads, dereferencing as each view finishes.
  */
-typedef struct {
+struct zoneload {
 	named_server_t *server;
 	bool reconfig;
-	isc_refcount_t refs;
-} ns_zoneload_t;
+	isc_refcount_t references;
+};
+typedef struct zoneload zoneload_t;
+ISC_REFCOUNT_STATIC_DECL(zoneload);
 
 typedef struct {
 	named_server_t *server;
@@ -3716,8 +3718,7 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	       named_cachelist_t *oldcachelist, dns_kasplist_t *kasplist,
 	       const cfg_obj_t *bindkeys, isc_mem_t *mctx,
 	       cfg_aclconfctx_t *aclctx,
-	       isc_tlsctx_cache_t *tlsctx_client_cache, bool need_hints,
-	       bool first_time) {
+	       isc_tlsctx_cache_t *tlsctx_client_cache, bool first_time) {
 	const cfg_obj_t *maps[4] = { 0 };
 	const cfg_obj_t *cfgmaps[3] = { 0 };
 	const cfg_obj_t *options = NULL;
@@ -3813,7 +3814,7 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	 * is used for real lookups and so cares about hints.
 	 */
 	obj = NULL;
-	if (view->rdclass == dns_rdataclass_in && need_hints &&
+	if (view->rdclass == dns_rdataclass_in &&
 	    named_config_get(maps, "response-policy", &obj) == ISC_R_SUCCESS)
 	{
 		CHECK(configure_rpz(view, NULL, obj, &old_rpz_ok, first_time));
@@ -3821,18 +3822,7 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	}
 
 	obj = NULL;
-	if (view->rdclass != dns_rdataclass_in && need_hints &&
-	    named_config_get(maps, "catalog-zones", &obj) == ISC_R_SUCCESS)
-	{
-		cfg_obj_log(obj, ISC_LOG_WARNING,
-			    "'catalog-zones' option is only supported "
-			    "for views with class IN");
-	}
-
-	obj = NULL;
-	if (view->rdclass == dns_rdataclass_in && need_hints &&
-	    named_config_get(maps, "catalog-zones", &obj) == ISC_R_SUCCESS)
-	{
+	if (named_config_get(maps, "catalog-zones", &obj) == ISC_R_SUCCESS) {
 		CHECK(configure_catz(view, NULL, config, obj));
 		catz_configured = true;
 	}
@@ -4662,9 +4652,7 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 					&rootzone);
 		if (rootzone != NULL) {
 			dns_zone_detach(&rootzone);
-			need_hints = false;
-		}
-		if (need_hints) {
+		} else {
 			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
 				      NAMED_LOGMODULE_SERVER, ISC_LOG_WARNING,
 				      "no root hints for view '%s'",
@@ -5558,7 +5546,7 @@ cleanup:
 
 			obj = NULL;
 			if (rpz_configured &&
-			    pview->rdclass == dns_rdataclass_in && need_hints &&
+			    pview->rdclass == dns_rdataclass_in &&
 			    named_config_get(maps, "response-policy", &obj) ==
 				    ISC_R_SUCCESS)
 			{
@@ -5584,7 +5572,7 @@ cleanup:
 
 			obj = NULL;
 			if (catz_configured &&
-			    pview->rdclass == dns_rdataclass_in && need_hints &&
+			    pview->rdclass == dns_rdataclass_in &&
 			    named_config_get(maps, "catalog-zones", &obj) ==
 				    ISC_R_SUCCESS)
 			{
@@ -7791,7 +7779,7 @@ configure_views(cfg_obj_t *config, const cfg_obj_t *bindkeys,
 		result = configure_view(view, viewlist, config, vconfig,
 					cachelist, &server->cachelist, kasplist,
 					bindkeys, isc_g_mctx, aclctx,
-					tlsctx_client_cache, true, first_time);
+					tlsctx_client_cache, first_time);
 		if (result != ISC_R_SUCCESS) {
 			dns_view_detach(&view);
 			return result;
@@ -7820,7 +7808,7 @@ configure_views(cfg_obj_t *config, const cfg_obj_t *bindkeys,
 		result = configure_view(view, viewlist, config, NULL, cachelist,
 					&server->cachelist, kasplist, bindkeys,
 					isc_g_mctx, aclctx, tlsctx_client_cache,
-					true, first_time);
+					first_time);
 		if (result != ISC_R_SUCCESS) {
 			dns_view_detach(&view);
 			return result;
@@ -9157,25 +9145,9 @@ load_configuration(named_server_t *server, bool first_time) {
 	effective = cfg_effective_config(config, builtin);
 
 	/*
-	 * Save the user and effective configurations in text format,
-	 * to display with "rndc showconf". (Text takes up less memory
-	 * than an object tree.)
-	 *
-	 * Also save the effective configuration as an object tree, if
-	 * "allow-new-zones" or catalog zones are in use. That takes
-	 * more memory but avoids the need to re-parse the configuration
-	 * when zone changes are made.
+	 * Save the user configuration in text format, to display with "rndc
+	 * showconf". (Text takes up less memory than an object tree.)
 	 */
-
-	if (server->effectiveconfig != NULL) {
-		cfg_obj_detach(&server->effectiveconfig);
-	}
-
-	if (server->effectivetext != NULL) {
-		isc_buffer_free(&server->effectivetext);
-	}
-	isc_buffer_allocate(isc_g_mctx, &server->effectivetext, BUFSIZ);
-
 	if (server->userconftext != NULL) {
 		isc_buffer_free(&server->userconftext);
 	}
@@ -9187,20 +9159,37 @@ load_configuration(named_server_t *server, bool first_time) {
 	};
 	cfg_printx(config, 0, emit_text, &dzarg);
 
-	dzarg = (ns_dzarg_t){
-		.magic = DZARG_MAGIC,
-		.text = &server->effectivetext,
-	};
-	cfg_printx(effective, 0, emit_text, &dzarg);
-
 	/*
 	 * And finally we apply the effective configuration.
 	 */
 	result = apply_configuration(effective, bindkeys, server, first_time,
 				     &newzones_allowed);
+
+	/*
+	 * Also save the effective configuration as an object tree, if
+	 * "allow-new-zones" or catalog zones are in use. That takes
+	 * more memory than text but avoids the need to re-parse the
+	 * configuration when zone changes are made. Otherwise, save the
+	 * effective configuration as text.
+	 */
+	if (server->effectiveconfig != NULL) {
+		cfg_obj_detach(&server->effectiveconfig);
+	}
+
+	if (server->effectivetext != NULL) {
+		isc_buffer_free(&server->effectivetext);
+	}
+
 	if (newzones_allowed) {
 		server->effectiveconfig = effective;
 		effective = NULL;
+	} else {
+		isc_buffer_allocate(isc_g_mctx, &server->effectivetext, BUFSIZ);
+		dzarg = (ns_dzarg_t){
+			.magic = DZARG_MAGIC,
+			.text = &server->effectivetext,
+		};
+		cfg_printx(effective, 0, emit_text, &dzarg);
 	}
 
 cleanup:
@@ -9220,80 +9209,75 @@ cleanup:
 	return result;
 }
 
-static isc_result_t
-view_loaded(void *arg) {
+static void
+destroy_zoneload(zoneload_t *zl) {
 	isc_result_t result;
-	ns_zoneload_t *zl = (ns_zoneload_t *)arg;
+	named_server_t *server = zl->server;
+	bool reconfig = zl->reconfig;
+
+	isc_refcount_destroy(&zl->references);
+	isc_mem_put(zl->server->mctx, zl, sizeof(*zl));
+
+	/*
+	 * To maintain compatibility with log parsing tools that might
+	 * be looking for this string after "rndc reconfig", we keep it
+	 * as it is
+	 */
+	if (reconfig) {
+		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+			      ISC_LOG_INFO,
+			      "any newly configured zones are now "
+			      "loaded");
+	} else {
+		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+			      ISC_LOG_NOTICE, "all zones loaded");
+	}
+
+	ISC_LIST_FOREACH(server->viewlist, view, link) {
+		if (view->managed_keys != NULL) {
+			result = dns_zone_synckeyzone(view->managed_keys);
+			if (result != ISC_R_SUCCESS) {
+				isc_log_write(
+					DNS_LOGCATEGORY_DNSSEC,
+					DNS_LOGMODULE_DNSSEC, ISC_LOG_ERROR,
+					"failed to initialize "
+					"managed-keys for view %s "
+					"(%s): DNSSEC validation is "
+					"at risk",
+					view->name, isc_result_totext(result));
+			}
+		}
+	}
 
 	/*
 	 * Force zone maintenance.  Do this after loading
 	 * so that we know when we need to force AXFR of
 	 * secondary zones whose master files are missing.
-	 *
-	 * We use the zoneload reference counter to let us
-	 * know when all views are finished.
 	 */
-	if (isc_refcount_decrement(&zl->refs) == 1) {
-		named_server_t *server = zl->server;
-		bool reconfig = zl->reconfig;
+	CHECKFATAL(dns_zonemgr_forcemaint(server->zonemgr),
+		   "forcing zone maintenance");
 
-		isc_refcount_destroy(&zl->refs);
-		isc_mem_put(server->mctx, zl, sizeof(*zl));
+	named_os_started();
 
-		/*
-		 * To maintain compatibility with log parsing tools that might
-		 * be looking for this string after "rndc reconfig", we keep it
-		 * as it is
-		 */
-		if (reconfig) {
-			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
-				      NAMED_LOGMODULE_SERVER, ISC_LOG_INFO,
-				      "any newly configured zones are now "
-				      "loaded");
-		} else {
-			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
-				      NAMED_LOGMODULE_SERVER, ISC_LOG_NOTICE,
-				      "all zones loaded");
-		}
+	isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+		      ISC_LOG_NOTICE, "FIPS mode is %s",
+		      isc_crypto_fips_mode() ? "enabled" : "disabled");
 
-		ISC_LIST_FOREACH(server->viewlist, view, link) {
-			if (view->managed_keys != NULL) {
-				result = dns_zone_synckeyzone(
-					view->managed_keys);
-				if (result != ISC_R_SUCCESS) {
-					isc_log_write(
-						DNS_LOGCATEGORY_DNSSEC,
-						DNS_LOGMODULE_DNSSEC,
-						ISC_LOG_ERROR,
-						"failed to initialize "
-						"managed-keys for view %s "
-						"(%s): DNSSEC validation is "
-						"at risk",
-						view->name,
-						isc_result_totext(result));
-				}
-			}
-		}
+	named_os_notify_systemd("READY=1\n"
+				"STATUS=running\n"
+				"MAINPID=%" PRId64 "\n",
+				(int64_t)getpid());
 
-		CHECKFATAL(dns_zonemgr_forcemaint(server->zonemgr),
-			   "forcing zone maintenance");
+	atomic_store(&server->reload_status, NAMED_RELOAD_DONE);
 
-		named_os_started();
+	isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+		      ISC_LOG_NOTICE, "running");
+}
+ISC_REFCOUNT_STATIC_IMPL(zoneload, destroy_zoneload);
 
-		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
-			      ISC_LOG_NOTICE, "FIPS mode is %s",
-			      isc_crypto_fips_mode() ? "enabled" : "disabled");
-
-		named_os_notify_systemd("READY=1\n"
-					"STATUS=running\n"
-					"MAINPID=%" PRId64 "\n",
-					(int64_t)getpid());
-
-		atomic_store(&server->reload_status, NAMED_RELOAD_DONE);
-
-		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
-			      ISC_LOG_NOTICE, "running");
-	}
+static isc_result_t
+view_loaded(void *arg) {
+	zoneload_unref(arg);
 
 	return ISC_R_SUCCESS;
 }
@@ -9301,15 +9285,11 @@ view_loaded(void *arg) {
 static isc_result_t
 load_zones(named_server_t *server, bool reconfig) {
 	isc_result_t result = ISC_R_SUCCESS;
-	ns_zoneload_t *zl = NULL;
+	zoneload_t *zl = isc_mem_get(server->mctx, sizeof(*zl));
 
-	zl = isc_mem_get(server->mctx, sizeof(*zl));
-	zl->server = server;
-	zl->reconfig = reconfig;
-
-	isc_loopmgr_pause();
-
-	isc_refcount_init(&zl->refs, 1);
+	*zl = (zoneload_t){ .server = server,
+			    .reconfig = reconfig,
+			    .references = ISC_REFCOUNT_INITIALIZER(1) };
 
 	/*
 	 * Schedule zones to be loaded from disk.
@@ -9321,7 +9301,7 @@ load_zones(named_server_t *server, bool reconfig) {
 			    result != DNS_R_UPTODATE &&
 			    result != ISC_R_LOADING && result != DNS_R_CONTINUE)
 			{
-				goto cleanup;
+				break;
 			}
 		}
 		if (view->redirect != NULL) {
@@ -9330,7 +9310,7 @@ load_zones(named_server_t *server, bool reconfig) {
 			    result != DNS_R_UPTODATE &&
 			    result != ISC_R_LOADING && result != DNS_R_CONTINUE)
 			{
-				goto cleanup;
+				break;
 			}
 		}
 
@@ -9338,22 +9318,15 @@ load_zones(named_server_t *server, bool reconfig) {
 		 * 'dns_view_asyncload' calls view_loaded if there are no
 		 * zones.
 		 */
-		isc_refcount_increment(&zl->refs);
+		zoneload_ref(zl);
 		result = dns_view_asyncload(view, reconfig, view_loaded, zl);
 		if (result != ISC_R_SUCCESS) {
-			isc_refcount_decrement1(&zl->refs);
-			goto cleanup;
+			zoneload_unref(zl);
+			break;
 		}
 	}
 
-cleanup:
-	if (isc_refcount_decrement(&zl->refs) == 1) {
-		isc_refcount_destroy(&zl->refs);
-		isc_mem_put(server->mctx, zl, sizeof(*zl));
-	}
-
-	isc_loopmgr_resume();
-
+	zoneload_detach(&zl);
 	return result;
 }
 
@@ -9878,11 +9851,11 @@ loadconfig(named_server_t *server) {
 			      ISC_LOG_INFO,
 			      "reloading configuration succeeded");
 	} else {
+		atomic_store(&server->reload_status, NAMED_RELOAD_FAILED);
 		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
 			      ISC_LOG_ERROR,
 			      "reloading configuration failed: %s",
 			      isc_result_totext(result));
-		atomic_store(&server->reload_status, NAMED_RELOAD_FAILED);
 	}
 
 	return result;
@@ -13939,6 +13912,11 @@ named_server_showconf(named_server_t *server, isc_lex_t *lex,
 		      isc_buffer_t **text) {
 	isc_result_t result = ISC_R_SUCCESS;
 	const char *arg = NULL;
+	cfg_obj_t *config = NULL;
+	ns_dzarg_t dzarg = {
+		.magic = DZARG_MAGIC,
+		.text = text,
+	};
 
 	REQUIRE(text != NULL && *text != NULL);
 
@@ -13954,14 +13932,16 @@ named_server_showconf(named_server_t *server, isc_lex_t *lex,
 		result = putmem(text, isc_buffer_base(server->userconftext),
 				isc_buffer_usedlength(server->userconftext));
 	} else if (strcasecmp(arg, "-effective") == 0) {
-		result = putmem(text, isc_buffer_base(server->effectivetext),
+		if (server->effectivetext != NULL) {
+			result = putmem(
+				text, isc_buffer_base(server->effectivetext),
 				isc_buffer_usedlength(server->effectivetext));
+		} else {
+			cfg_printx(server->effectiveconfig, 0, emit_text,
+				   &dzarg);
+			result = dzarg.result;
+		}
 	} else if (strcasecmp(arg, "-builtin") == 0) {
-		cfg_obj_t *config = NULL;
-		ns_dzarg_t dzarg = {
-			.magic = DZARG_MAGIC,
-			.text = text,
-		};
 		CHECK(named_config_parsedefaults(&config));
 		cfg_printx(config, 0, emit_text, &dzarg);
 		cfg_obj_detach(&config);

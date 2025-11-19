@@ -1999,6 +1999,37 @@ check_options(const cfg_obj_t *options, const cfg_obj_t *config,
 		}
 	}
 
+	obj = NULL;
+	(void)cfg_map_get(options, "prefetch", &obj);
+	if (obj != NULL) {
+		const cfg_obj_t *trigger = cfg_tuple_get(obj, "trigger");
+		const cfg_obj_t *eligible = cfg_tuple_get(obj, "eligible");
+		uint32_t tvalue = cfg_obj_asuint32(trigger);
+
+		if (tvalue > 10) {
+			cfg_obj_log(obj, ISC_LOG_ERROR,
+				    "prefetch '%u' out of range (0..10)",
+				    tvalue);
+			if (result == ISC_R_SUCCESS) {
+				result = ISC_R_RANGE;
+			}
+		}
+
+		if (!cfg_obj_isvoid(eligible)) {
+			uint32_t evalue = cfg_obj_asuint32(eligible);
+			if (evalue < tvalue + 6) {
+				cfg_obj_log(obj, ISC_LOG_ERROR,
+					    "prefetch eligibility '%u' must be "
+					    "at least six seconds longer than "
+					    "the trigger value '%u'",
+					    evalue, tvalue);
+				if (result == ISC_R_SUCCESS) {
+					result = ISC_R_RANGE;
+				}
+			}
+		}
+	}
+
 	if (aclctx != NULL) {
 		cfg_aclconfctx_detach(&aclctx);
 	}
@@ -5539,11 +5570,21 @@ check_viewconf(const cfg_obj_t *config, const cfg_obj_t *voptions,
 	 */
 	if (opts != NULL) {
 		obj = NULL;
-		if ((cfg_map_get(opts, "catalog-zones", &obj) ==
-		     ISC_R_SUCCESS) &&
-		    (check_catz(obj, viewname, mctx) != ISC_R_SUCCESS))
-		{
-			result = ISC_R_FAILURE;
+		if (cfg_map_get(opts, "catalog-zones", &obj) == ISC_R_SUCCESS) {
+			if (vclass != dns_rdataclass_in) {
+				cfg_obj_log(
+					obj, ISC_LOG_ERROR,
+					"'catalog-zones' option is only "
+					"supported for views with class IN");
+
+				if (result == ISC_R_SUCCESS) {
+					result = ISC_R_FAILURE;
+				}
+			}
+
+			if (check_catz(obj, viewname, mctx) != ISC_R_SUCCESS) {
+				result = ISC_R_FAILURE;
+			}
 		}
 	}
 
