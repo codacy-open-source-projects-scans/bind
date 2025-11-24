@@ -1,5 +1,3 @@
-#!/bin/sh -e
-
 # Copyright (C) Internet Systems Consortium, Inc. ("ISC")
 #
 # SPDX-License-Identifier: MPL-2.0
@@ -11,17 +9,17 @@
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
 
-# shellcheck source=conf.sh
-. ../conf.sh
+import isctest
 
-set -e
 
-(
-  cd ns2
-  $SHELL setup.sh
-)
+def test_nohintswarn_bindchaos(ns1):
+    found = True
+    try:
+        with ns1.watch_log_from_start(timeout=1) as watcher:
+            watcher.wait_for_line("no root hints for view '_bind'")
+    except isctest.log.watchlog.WatchLogTimeout:
+        found = False
+    assert found is False
 
-(
-  cd ns3
-  $SHELL setup.sh
-)
+    with ns1.watch_log_from_start() as watcher:
+        watcher.wait_for_line("no root hints for view 'bar'")
