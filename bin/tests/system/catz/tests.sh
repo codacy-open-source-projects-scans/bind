@@ -650,8 +650,7 @@ nextpart ns2/named.run >/dev/null
 n=$((n + 1))
 echo_i "reconfiguring secondary - checking if catz survives a certain class of failed reconfiguration attempts ($n)"
 ret=0
-sed -e "s/^#T3//" <ns2/named1.conf.in >ns2/named.conf.tmp
-copy_setports ns2/named.conf.tmp ns2/named.conf
+cp ns2/named2.conf ns2/named.conf
 $RNDC -c ../_common/rndc.conf -s 10.53.0.2 -p "${CONTROLPORT}" reconfig >/dev/null 2>&1 && ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -666,7 +665,7 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "reconfiguring secondary - reverting the bad configuration ($n)"
 ret=0
-copy_setports ns2/named1.conf.in ns2/named.conf
+cp ns2/named1.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -677,8 +676,7 @@ nextpart ns2/named.run >/dev/null
 n=$((n + 1))
 echo_i "reconfiguring secondary - checking if catz survives another type of failed reconfiguration attempts ($n)"
 ret=0
-sed -e "s/^#T4//" <ns2/named1.conf.in >ns2/named.conf.tmp
-copy_setports ns2/named.conf.tmp ns2/named.conf
+cp ns2/named3.conf ns2/named.conf
 $RNDC -c ../_common/rndc.conf -s 10.53.0.2 -p "${CONTROLPORT}" reconfig >/dev/null 2>&1 && ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -697,8 +695,7 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "reconfiguring secondary - checking if catz member zones are reconfigured ($n)"
 ret=0
-sed -e "s/^#T5//" <ns2/named1.conf.in >ns2/named.conf.tmp
-copy_setports ns2/named.conf.tmp ns2/named.conf
+cp ns2/named4.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -713,7 +710,7 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "reconfiguring secondary - reverting the bad configuration ($n)"
 ret=0
-copy_setports ns2/named1.conf.in ns2/named.conf
+cp ns2/named1.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -1714,8 +1711,7 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "reconfiguring secondary - adding catalog4 catalog zone ($n)"
 ret=0
-sed -e "s/^#T1//g" <ns2/named1.conf.in >ns2/named.conf.tmp
-copy_setports ns2/named.conf.tmp ns2/named.conf
+cp ns2/named5.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -1745,8 +1741,7 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "reconfiguring secondary - removing catalog4 catalog zone, adding non-existent catalog5 catalog zone ($n)"
 ret=0
-sed -e "s/^#T2//" <ns2/named1.conf.in >ns2/named.conf.tmp
-copy_setports ns2/named.conf.tmp ns2/named.conf
+cp ns2/named6.conf ns2/named.conf
 $RNDC -c ../_common/rndc.conf -s 10.53.0.2 -p "${CONTROLPORT}" reconfig >/dev/null 2>&1 && ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -1754,7 +1749,7 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "reconfiguring secondary - removing non-existent catalog5 catalog zone ($n)"
 ret=0
-copy_setports ns2/named1.conf.in ns2/named.conf
+cp ns2/named1.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -2545,9 +2540,9 @@ status=$((status + ret))
 n=$((n + 1))
 echo_i "checking that reconfig can delete and restore catalog zone configuration ($n)"
 ret=0
-copy_setports ns2/named2.conf.in ns2/named.conf
+cp ns2/named7.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
-copy_setports ns2/named1.conf.in ns2/named.conf
+cp ns2/named1.conf ns2/named.conf
 rndccmd 10.53.0.2 reconfig || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -2638,6 +2633,74 @@ n=$((n + 1))
 echo_i "checking that tls1.example. is served by secondary ($n)"
 ret=0
 wait_for_soa @10.53.0.4 tls1.example. dig.out.test$n || ret=1
+if [ $ret -ne 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+##########################################################################
+# GL #5658
+
+n=$((n + 1))
+echo_i "Adding a domain longlong.longlong.long.long.name.example. to primary via RNDC ($n)"
+ret=0
+# enough initial content for IXFR response when TXT record is added below
+echo "@ 3600 IN SOA . . 1 3600 3600 3600 3600" >ns1/longlong.longlong.long.long.name.example.db
+echo "@ 3600 IN NS invalid." >>ns1/longlong.longlong.long.long.name.example.db
+echo "foo 3600 IN TXT some content here" >>ns1/longlong.longlong.long.long.name.example.db
+echo "bar 3600 IN TXT some content here" >>ns1/longlong.longlong.long.long.name.example.db
+echo "xxx 3600 IN TXT some content here" >>ns1/longlong.longlong.long.long.name.example.db
+echo "yyy 3600 IN TXT some content here" >>ns1/longlong.longlong.long.long.name.example.db
+rndccmd 10.53.0.1 addzone longlong.longlong.long.long.name.example. in default '{ type primary; file "longlong.longlong.long.long.name.example.db"; allow-transfer { key longlonglongname0123456789abcdef; }; allow-update { any; }; notify explicit; also-notify { 10.53.0.4; }; };' || ret=1
+if [ $ret -ne 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+n=$((n + 1))
+echo_i "checking that longlong.longlong.long.long.name.example. is now served by primary ($n)"
+ret=0
+wait_for_soa @10.53.0.1 longlong.longlong.long.long.name.example. dig.out.test$n || ret=1
+if [ $ret -ne 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+nextpart ns4/named.run >/dev/null
+
+n=$((n + 1))
+echo_i "Adding domain longlong.longlong.long.long.name.example. to catalog-misc zone ($n)"
+ret=0
+$NSUPDATE -d <<END >>nsupdate.out.test$n 2>&1 || ret=1
+    server 10.53.0.1 ${PORT}
+    update add longlong.zones.catalog-misc.example. 3600 IN PTR longlong.longlong.long.long.name.example.
+    update add label1.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label1.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label2.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label2.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label3.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label3.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label4.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label4.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label5.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label5.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label6.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label6.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label7.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label7.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    update add label8.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN A 10.53.0.1
+    update add label8.primaries.ext.longlong.zones.catalog-misc.example. 3600 IN TXT "longlonglongname0123456789abcdef"
+    send
+END
+if [ $ret -ne 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+n=$((n + 1))
+echo_i "waiting for secondary to sync up ($n)"
+ret=0
+wait_for_message ns4/named.run "catz: adding zone 'longlong.longlong.long.long.name.example' from catalog 'catalog-misc.example'" \
+  && wait_for_message ns4/named.run "transfer of 'longlong.longlong.long.long.name.example/IN' from 10.53.0.1#${PORT}: Transfer status: success" || ret=1
+if [ $ret -ne 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+n=$((n + 1))
+echo_i "checking that longlong.longlong.long.long.name.example. is served by secondary ($n)"
+ret=0
+wait_for_soa @10.53.0.4 longlong.longlong.long.long.name.example. dig.out.test$n || ret=1
 if [ $ret -ne 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 

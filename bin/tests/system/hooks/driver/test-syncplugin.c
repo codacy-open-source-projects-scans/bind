@@ -28,14 +28,6 @@ typedef struct {
 	char *firstlbl;
 } syncplugin_t;
 
-#define CHECK(op)                              \
-	do {                                   \
-		result = (op);                 \
-		if (result != ISC_R_SUCCESS) { \
-			goto cleanup;          \
-		}                              \
-	} while (0)
-
 static ns_hookresult_t
 syncplugin__hook(void *arg, void *cbdata, isc_result_t *resp) {
 	query_ctx_t *qctx = (query_ctx_t *)arg;
@@ -66,9 +58,9 @@ syncplugin__hook(void *arg, void *cbdata, isc_result_t *resp) {
 }
 
 static cfg_clausedef_t syncplugin__cfgclauses[] = {
-	{ "rcode", &cfg_type_astring, 0 },
-	{ "source", &cfg_type_astring, 0 },
-	{ "firstlbl", &cfg_type_qstring, CFG_CLAUSEFLAG_OPTIONAL }
+	{ "rcode", &cfg_type_astring, 0, NULL },
+	{ "source", &cfg_type_astring, 0, NULL },
+	{ "firstlbl", &cfg_type_qstring, CFG_CLAUSEFLAG_OPTIONAL, NULL }
 };
 
 static cfg_clausedef_t *syncplugin__cfgparamsclausesets[] = {
@@ -82,16 +74,13 @@ static cfg_type_t syncplugin__cfgparams = {
 
 static isc_result_t
 syncplugin__parse_rcode(const cfg_obj_t *syncplugincfg, uint8_t *rcode) {
-	isc_result_t result;
+	isc_result_t result = ISC_R_SUCCESS;
 	const cfg_obj_t *obj = NULL;
 	const char *rcodestr = NULL;
 
-	result = cfg_map_get(syncplugincfg, "rcode", &obj);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(cfg_map_get(syncplugincfg, "rcode", &obj));
 
-	rcodestr = obj->value.string.base;
+	rcodestr = obj->value.string;
 
 	if (strcmp("servfail", rcodestr) == 0) {
 		*rcode = dns_rcode_servfail;
@@ -137,8 +126,8 @@ plugin_register(const char *parameters, const void *cfg, const char *cfgfile,
 	isc_buffer_constinit(&b, parameters, strlen(parameters));
 	isc_buffer_add(&b, strlen(parameters));
 
-	CHECK(cfg_parse_buffer(mctx, &b, cfgfile, cfgline,
-			       &syncplugin__cfgparams, 0, &syncplugincfg));
+	CHECK(cfg_parse_buffer(&b, cfgfile, cfgline, &syncplugin__cfgparams, 0,
+			       &syncplugincfg));
 
 	CHECK(syncplugin__parse_rcode(syncplugincfg, &inst->rcode));
 
@@ -152,7 +141,7 @@ plugin_register(const char *parameters, const void *cfg, const char *cfgfile,
 
 	obj = NULL;
 	CHECK(cfg_map_get(syncplugincfg, "source", &obj));
-	sourcestr = obj->value.string.base;
+	sourcestr = obj->value.string;
 
 	if (strcmp(sourcestr, "zone") == 0) {
 		if (ctx->source != NS_HOOKSOURCE_ZONE) {

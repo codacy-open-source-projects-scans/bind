@@ -37,15 +37,11 @@
 
 static isc_result_t
 getcommand(isc_lex_t *lex, char **cmdp) {
-	isc_result_t result;
 	isc_token_t token;
 
 	REQUIRE(cmdp != NULL && *cmdp == NULL);
 
-	result = isc_lex_gettoken(lex, ISC_LEXOPT_EOF, &token);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(isc_lex_gettoken(lex, ISC_LEXOPT_EOF, &token));
 
 	isc_lex_ungettoken(lex, &token);
 
@@ -69,7 +65,7 @@ command_compare(const char *str, const char *command) {
  */
 isc_result_t
 named_control_docommand(isccc_sexpr_t *message, bool readonly,
-			isc_buffer_t **text) {
+			isc_buffer_t *text) {
 	isccc_sexpr_t *data;
 	char *cmdline = NULL;
 	char *command = NULL;
@@ -89,27 +85,15 @@ named_control_docommand(isccc_sexpr_t *message, bool readonly,
 		return ISC_R_FAILURE;
 	}
 
-	result = isccc_cc_lookupstring(data, "type", &cmdline);
-	if (result != ISC_R_SUCCESS) {
-		/*
-		 * We have no idea what this is.
-		 */
-		return result;
-	}
+	RETERR(isccc_cc_lookupstring(data, "type", &cmdline));
 
 	isc_lex_create(isc_g_mctx, strlen(cmdline), &lex);
 
 	isc_buffer_init(&src, cmdline, strlen(cmdline));
 	isc_buffer_add(&src, strlen(cmdline));
-	result = isc_lex_openbuffer(lex, &src);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
+	CHECK(isc_lex_openbuffer(lex, &src));
 
-	result = getcommand(lex, &command);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
+	CHECK(getcommand(lex, &command));
 
 	/*
 	 * Compare the 'command' parameter against all known control commands.
@@ -140,8 +124,7 @@ named_control_docommand(isccc_sexpr_t *message, bool readonly,
 			      "rejecting restricted control channel "
 			      "command '%s'",
 			      cmdline);
-		result = ISC_R_FAILURE;
-		goto cleanup;
+		CLEANUP(ISC_R_FAILURE);
 	}
 
 	isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_CONTROL,
@@ -177,7 +160,7 @@ named_control_docommand(isccc_sexpr_t *message, bool readonly,
 #endif /* ifdef HAVE_LIBSCF */
 		/* Do not flush master files */
 		named_server_flushonshutdown(named_g_server, false);
-		named_os_shutdownmsg(cmdline, *text);
+		named_os_shutdownmsg(cmdline, text);
 		isc_loopmgr_shutdown();
 		result = ISC_R_SHUTTINGDOWN;
 	} else if (command_compare(command, NAMED_COMMAND_STOP)) {
@@ -195,7 +178,7 @@ named_control_docommand(isccc_sexpr_t *message, bool readonly,
 		}
 #endif /* ifdef HAVE_LIBSCF */
 		named_server_flushonshutdown(named_g_server, true);
-		named_os_shutdownmsg(cmdline, *text);
+		named_os_shutdownmsg(cmdline, text);
 		isc_loopmgr_shutdown();
 		result = ISC_R_SHUTTINGDOWN;
 	} else if (command_compare(command, NAMED_COMMAND_ADDZONE) ||
@@ -252,7 +235,7 @@ named_control_docommand(isccc_sexpr_t *message, bool readonly,
 						  "query logging",
 						  NS_SERVER_LOGQUERIES, lex);
 	} else if (command_compare(command, NAMED_COMMAND_RECONFIG)) {
-		result = named_server_reconfigcommand(named_g_server, *text);
+		result = named_server_reconfigcommand(named_g_server, text);
 	} else if (command_compare(command, NAMED_COMMAND_RECURSING)) {
 		result = named_server_dumprecursing(named_g_server);
 	} else if (command_compare(command, NAMED_COMMAND_REFRESH)) {

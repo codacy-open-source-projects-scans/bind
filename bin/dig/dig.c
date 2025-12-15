@@ -302,10 +302,12 @@ help(void) {
 	       "short\n"
 	       "                                      form of answers - global "
 	       "option)\n"
+	       "                 +[no]showallmessages (Show all messages)\n"
 	       "                 +[no]showbadcookie  (Show BADCOOKIE message)\n"
 	       "                 +[no]showbadvers    (Show BADVERS message)\n"
 	       "                 +[no]showsearch     (Search with intermediate "
 	       "results)\n"
+	       "                 +[no]showtruncated  (Show truncated message)\n"
 	       "                 +[no]split=##       (Split hex/base64 fields "
 	       "into chunks)\n"
 	       "                 +[no]stats          (Control display of "
@@ -501,10 +503,7 @@ say_message(dns_rdata_t *rdata, dig_query_t *query, isc_buffer_t *buf) {
 	unsigned int styleflags = 0;
 
 	if (query->lookup->trace || query->lookup->ns_search_only) {
-		result = dns_rdatatype_totext(rdata->type, buf);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(dns_rdatatype_totext(rdata->type, buf));
 		ADD_STRING(buf, " ");
 	}
 
@@ -581,14 +580,8 @@ dns64prefix_answer(dns_message_t *msg, isc_buffer_t *buf) {
 		count = 10;
 	}
 	for (i = 0; i < count; i++) {
-		result = isc_netaddr_totext(&prefix[i].addr, buf);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
-		result = isc_buffer_printf(buf, "/%u\n", prefix[i].prefixlen);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(isc_netaddr_totext(&prefix[i].addr, buf));
+		RETERR(isc_buffer_printf(buf, "/%u\n", prefix[i].prefixlen));
 	}
 
 	return ISC_R_SUCCESS;
@@ -2312,6 +2305,13 @@ plus_option(char *option, bool is_batchfile, bool *need_clone,
 				break;
 			case 'w': /* showsearch */
 				switch (cmd[4]) {
+				case 'a':
+					FULLCHECK("showallmessages");
+					lookup->showbadcookie = state;
+					lookup->showbadvers = state;
+					lookup->showtruncated = state;
+					lookup->qr = state;
+					break;
 				case 'b':
 					switch (cmd[7]) {
 					case 'c':
@@ -2332,6 +2332,10 @@ plus_option(char *option, bool is_batchfile, bool *need_clone,
 						showsearch = state;
 						usesearch = state;
 					}
+					break;
+				case 't':
+					FULLCHECK("showtruncated");
+					lookup->showtruncated = state;
 					break;
 				default:
 					goto invalid_option;

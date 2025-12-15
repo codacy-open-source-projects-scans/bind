@@ -196,38 +196,47 @@ struct cfg_rep {
  * A configuration object.  This is the main building block
  * of the configuration parse tree.
  */
+typedef struct {
+	isc_sockaddr_t sockaddr;
+	char	      *tls;
+} cfg_sockaddrtls_t;
 
 struct cfg_obj {
-	unsigned int   magic;
-	isc_mem_t     *mctx;
-	isc_refcount_t references;
+	/*
+	 * These two 4 byte fields are contiguous to avoid an extra
+	 * padding of 4 bytes each, avoiding an extra 8 bytes in the
+	 * struct.
+	 *
+	 * `line` is 31 bits long (~2,000,000,000 is likely enough lines in a
+	 * named config) so the `cloned` boolean fit in the extra bit, and won't
+	 * take extra 8 bits because of padding.
+	 */
+	unsigned int magic;
+	unsigned int line : 31;
 
 	/*%
 	 * Indicates that an object was cloned from the defaults
 	 * or otherwise generated during the configuration merge
-	 * process:
+	 * process.
 	 */
-	bool cloned;
+	bool cloned : 1;
 
+	isc_refcount_t	  references;
+	cfg_obj_t	 *file; /*%< separate string with its own refcount */
 	const cfg_type_t *type;
 	union {
-		uint32_t	 uint32;
-		uint64_t	 uint64;
-		isc_textregion_t string; /*%< null terminated, too */
-		bool		 boolean;
-		cfg_map_t	 map;
-		cfg_list_t	 list;
-		cfg_obj_t      **tuple;
-		isc_sockaddr_t	*sockaddr;
-		struct {
-			isc_sockaddr_t	*sockaddr;
-			isc_textregion_t tls;
-		} sockaddrtls;
+		uint32_t	   uint32;
+		uint64_t	   uint64;
+		char		  *string; /*%< null terminated */
+		bool		   boolean;
+		cfg_map_t	  *map;
+		cfg_list_t	  *list;
+		cfg_obj_t	 **tuple;
+		isc_sockaddr_t	  *sockaddr;
+		cfg_sockaddrtls_t *sockaddrtls;
 		cfg_netprefix_t	  *netprefix;
 		isccfg_duration_t *duration;
 	} value;
-	cfg_obj_t   *file; /*%< separate string with its own refcount */
-	unsigned int line;
 };
 
 /*% A list element. */
@@ -238,7 +247,6 @@ struct cfg_listelt {
 
 /*% The parser object. */
 struct cfg_parser {
-	isc_mem_t   *mctx;
 	isc_lex_t   *lexer;
 	unsigned int errors;
 	unsigned int warnings;
@@ -288,9 +296,6 @@ struct cfg_parser {
 	 * from one token to the next.
 	 */
 	unsigned int flags;
-
-	/*%< Reference counter */
-	isc_refcount_t references;
 };
 
 /* Parser context flags */
@@ -379,8 +384,12 @@ cfg_ungettoken(cfg_parser_t *pctx);
 #define CFG_LEXOPT_QSTRING (ISC_LEXOPT_QSTRING | ISC_LEXOPT_QSTRINGMULTILINE)
 
 void
-cfg_obj_create(isc_mem_t *mctx, cfg_obj_t *file, size_t line,
-	       const cfg_type_t *type, cfg_obj_t **ret);
+cfg_obj_create(cfg_obj_t *file, size_t line, const cfg_type_t *type,
+	       cfg_obj_t **ret);
+
+void
+cfg_string_create(cfg_parser_t *pctx, const char *contents,
+		  const cfg_type_t *type, cfg_obj_t **ret);
 
 void
 cfg_print_rawuint(cfg_printer_t *pctx, unsigned int u);
@@ -463,6 +472,9 @@ cfg_doc_tuple(cfg_printer_t *pctx, const cfg_type_t *type);
 isc_result_t
 cfg_parse_listelt(cfg_parser_t *pctx, cfg_obj_t *list,
 		  const cfg_type_t *elttype, cfg_listelt_t **ret);
+
+void
+cfg_listelt_create(cfg_listelt_t **ret);
 
 isc_result_t
 cfg_parse_bracketed_list(cfg_parser_t *pctx, const cfg_type_t *type,

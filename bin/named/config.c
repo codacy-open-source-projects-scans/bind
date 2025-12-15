@@ -55,11 +55,11 @@ named_config_parsedefaults(cfg_obj_t **conf) {
 	isc_buffer_constinit(&b, common_named_defaultconf,
 			     sizeof(common_named_defaultconf) - 1);
 	isc_buffer_add(&b, sizeof(common_named_defaultconf) - 1);
-	return cfg_parse_buffer(
-		isc_g_mctx, &b, __FILE__, 0, &cfg_type_namedconf,
-		CFG_PCTX_NODEPRECATED | CFG_PCTX_NOOBSOLETE |
-			CFG_PCTX_NOEXPERIMENTAL | CFG_PCTX_BUILTIN,
-		conf);
+	return cfg_parse_buffer(&b, __FILE__, 0, &cfg_type_namedconf,
+				CFG_PCTX_NODEPRECATED | CFG_PCTX_NOOBSOLETE |
+					CFG_PCTX_NOEXPERIMENTAL |
+					CFG_PCTX_BUILTIN,
+				conf);
 }
 
 isc_result_t
@@ -72,11 +72,7 @@ named_config_parsefile(cfg_obj_t **conf) {
 		      ISC_LOG_INFO, "parsing user configuration from '%s'",
 		      named_g_conffile);
 
-	result = cfg_parse_file(isc_g_mctx, named_g_conffile,
-				&cfg_type_namedconf, 0, conf);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
+	CHECK(cfg_parse_file(named_g_conffile, &cfg_type_namedconf, 0, conf));
 
 	/*
 	 * Check the validity of the configuration.
@@ -85,11 +81,7 @@ named_config_parsefile(cfg_obj_t **conf) {
 	 * checked later when the modules are actually loaded and
 	 * registered.)
 	 */
-	result = isccfg_check_namedconf(*conf, BIND_CHECK_ALGORITHMS,
-					isc_g_mctx);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
+	CHECK(isccfg_check_namedconf(*conf, BIND_CHECK_ALGORITHMS, isc_g_mctx));
 
 	goto out;
 
@@ -255,17 +247,13 @@ named_config_getzonetype(const cfg_obj_t *zonetypeobj) {
 isc_result_t
 named_config_getremotesdef(const cfg_obj_t *cctx, const char *list,
 			   const char *name, const cfg_obj_t **ret) {
-	isc_result_t result;
 	const cfg_obj_t *obj = NULL;
 
 	REQUIRE(cctx != NULL);
 	REQUIRE(name != NULL);
 	REQUIRE(ret != NULL && *ret == NULL);
 
-	result = cfg_map_get(cctx, list, &obj);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(cfg_map_get(cctx, list, &obj));
 	CFG_LIST_FOREACH(obj, elt) {
 		obj = cfg_listelt_value(elt);
 		if (strcasecmp(cfg_obj_asstring(cfg_tuple_get(obj, "name")),
@@ -329,77 +317,62 @@ named_config_getname(isc_mem_t *mctx, const cfg_obj_t *obj,
 static const char *remotesnames[4] = { "remote-servers", "parental-agents",
 				       "primaries", "masters" };
 
-isc_result_t
-named_config_getipandkeylist(const cfg_obj_t *config, const cfg_obj_t *list,
-			     isc_mem_t *mctx, dns_ipkeylist_t *ipkl) {
-	uint32_t addrcount = 0, srccount = 0;
-	uint32_t keycount = 0, tlscount = 0;
-	uint32_t listcount = 0, l = 0, i = 0;
-	uint32_t stackcount = 0, pushed = 0;
-	isc_result_t result;
-	const cfg_listelt_t *element;
-	const cfg_obj_t *addrlist;
-	const cfg_obj_t *portobj;
-	const cfg_obj_t *src4obj;
-	const cfg_obj_t *src6obj;
+typedef struct {
+	isc_sockaddr_t *addrs;
+	size_t addrsallocated;
+
+	isc_sockaddr_t *sources;
+	size_t sourcesallocated;
+
+	dns_name_t **keys;
+	size_t keysallocated;
+
+	dns_name_t **tlss;
+	size_t tlssallocated;
+
+	size_t count; /* common to addrs, sources, keys and tlss */
+
+	const char **seen;
+	size_t seencount;
+	size_t seenallocated;
+} getipandkeylist_state_t;
+
+static isc_result_t
+getipandkeylist(in_port_t defport, in_port_t deftlsport,
+		const cfg_obj_t *config, const cfg_obj_t *list,
+		in_port_t listport, const cfg_obj_t *listkey,
+		const cfg_obj_t *listtls, isc_mem_t *mctx,
+		getipandkeylist_state_t *s) {
+	const cfg_obj_t *addrlist = cfg_tuple_get(list, "addresses");
+	const cfg_obj_t *portobj = cfg_tuple_get(list, "port");
+	const cfg_obj_t *src4obj = cfg_tuple_get(list, "source");
+	const cfg_obj_t *src6obj = cfg_tuple_get(list, "source-v6");
 	in_port_t port = (in_port_t)0;
-	in_port_t def_port;
-	in_port_t def_tlsport;
 	isc_sockaddr_t src4;
 	isc_sockaddr_t src6;
-	isc_sockaddr_t *addrs = NULL;
-	isc_sockaddr_t *sources = NULL;
-	dns_name_t **keys = NULL;
-	dns_name_t **tlss = NULL;
-	struct {
-		const char *name;
-		in_port_t port;
-		isc_sockaddr_t *src4s;
-		isc_sockaddr_t *src6s;
-	} *lists = NULL;
-	struct {
-		const cfg_listelt_t *element;
-		in_port_t port;
-		isc_sockaddr_t src4;
-		isc_sockaddr_t src6;
-	} *stack = NULL;
-
-	REQUIRE(ipkl != NULL);
-	REQUIRE(ipkl->count == 0);
-	REQUIRE(ipkl->addrs == NULL);
-	REQUIRE(ipkl->keys == NULL);
-	REQUIRE(ipkl->tlss == NULL);
-	REQUIRE(ipkl->labels == NULL);
-	REQUIRE(ipkl->allocated == 0);
-
-	/*
-	 * Get system defaults.
-	 */
-	result = named_config_getport(config, "port", &def_port);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
-
-	result = named_config_getport(config, "tls-port", &def_tlsport);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
-
-newlist:
-	addrlist = cfg_tuple_get(list, "addresses");
-	portobj = cfg_tuple_get(list, "port");
-	src4obj = cfg_tuple_get(list, "source");
-	src6obj = cfg_tuple_get(list, "source-v6");
+	isc_result_t result = ISC_R_SUCCESS;
 
 	if (cfg_obj_isuint32(portobj)) {
 		uint32_t val = cfg_obj_asuint32(portobj);
 		if (val > UINT16_MAX) {
 			cfg_obj_log(portobj, ISC_LOG_ERROR,
 				    "port '%u' out of range", val);
-			result = ISC_R_RANGE;
-			goto cleanup;
+			return ISC_R_RANGE;
 		}
 		port = (in_port_t)val;
+	} else if (listport > 0) {
+		/*
+		 * No port in the current list, but it is a list named elsewhere
+		 * where the port is defined, i.e:
+		 *
+		 * remote-servers bar { 10.53.0.4; };
+		 * remote-servers foo port 5555 { bar; 10.54.0.3; };
+		 *                                ^^^
+		 *
+		 * The current list is the list `bar`, and the server
+		 * `10.53.0.4` has the port `5555` defined.
+		 */
+		port = listport;
 	}
 
 	if (src4obj != NULL && cfg_obj_issockaddr(src4obj)) {
@@ -414,193 +387,252 @@ newlist:
 		isc_sockaddr_any6(&src6);
 	}
 
-	element = cfg_list_first(addrlist);
-resume:
-	for (; element != NULL; element = cfg_list_next(element)) {
+	for (const cfg_listelt_t *element = cfg_list_first(addrlist);
+	     element != NULL; element = cfg_list_next(element))
+	{
 		const cfg_obj_t *addr;
 		const cfg_obj_t *key;
 		const cfg_obj_t *tls;
 
+	skiplist:
 		addr = cfg_tuple_get(cfg_listelt_value(element),
 				     "remoteselement");
 		key = cfg_tuple_get(cfg_listelt_value(element), "key");
 		tls = cfg_tuple_get(cfg_listelt_value(element), "tls");
 
+		/*
+		 * If this is not an address, this is the name of a nested list,
+		 * i.e.
+		 *
+		 * remote-servers nestedlist { 10.53.0.4; };
+		 * remote-servers list { nestedlist key foo; 10.54.0.6; };
+		 *                       ^^^^^^^^^^^^^^^^^^
+		 *
+		 * We are currently in the list `list`, and `addr` is the name
+		 * `nestedlist`, so we'll immediately recurse to process
+		 * `nestedlist` before processing the next element of `list`.
+		 */
 		if (!cfg_obj_issockaddr(addr)) {
 			const char *listname = cfg_obj_asstring(addr);
+			const cfg_obj_t *nestedlist = NULL;
 			isc_result_t tresult;
-			uint32_t j;
 
-			/* Grow lists? */
-			grow_array(mctx, lists, l, listcount);
-
-			/* Seen? */
-			for (j = 0; j < l; j++) {
-				if (strcasecmp(lists[j].name, listname) == 0) {
-					break;
+			for (size_t i = 0; i < s->seencount; i++) {
+				if (strcasecmp(s->seen[i], listname) == 0) {
+					element = cfg_list_next(element);
+					goto skiplist;
 				}
 			}
-			if (j < l) {
-				continue;
-			}
-			list = NULL;
-			tresult = ISC_R_NOTFOUND;
-			for (size_t n = 0; n < ARRAY_SIZE(remotesnames); n++) {
+
+			grow_array(mctx, s->seen, s->seencount,
+				   s->seenallocated);
+			s->seen[s->seencount] = listname;
+
+			for (size_t i = 0; i < ARRAY_SIZE(remotesnames); i++) {
 				tresult = named_config_getremotesdef(
-					config, remotesnames[n], listname,
-					&list);
+					config, remotesnames[i], listname,
+					&nestedlist);
 				if (tresult == ISC_R_SUCCESS) {
 					break;
 				}
 			}
-			if (tresult == ISC_R_NOTFOUND) {
+
+			if (tresult != ISC_R_SUCCESS) {
 				cfg_obj_log(addr, ISC_LOG_ERROR,
 					    "remote-servers \"%s\" not found",
 					    listname);
+				return tresult;
 			}
-			if (tresult != ISC_R_SUCCESS) {
-				result = tresult;
-				goto cleanup;
+
+			result = getipandkeylist(defport, deftlsport, config,
+						 nestedlist, port, key, tls,
+						 mctx, s);
+			if (result != ISC_R_SUCCESS) {
+				goto out;
 			}
-			lists[l++].name = listname;
-			/* Grow stack? */
-			grow_array(mctx, stack, pushed, stackcount);
-			/*
-			 * We want to resume processing this list on the
-			 * next element.
-			 */
-			stack[pushed].element = cfg_list_next(element);
-			stack[pushed].port = port;
-			stack[pushed].src4 = src4;
-			stack[pushed].src6 = src6;
-			pushed++;
-			goto newlist;
+			continue;
 		}
 
-		grow_array(mctx, addrs, i, addrcount);
-		grow_array(mctx, keys, i, keycount);
-		grow_array(mctx, tlss, i, tlscount);
-		grow_array(mctx, sources, i, srccount);
+		grow_array(mctx, s->addrs, s->count, s->addrsallocated);
+		grow_array(mctx, s->keys, s->count, s->keysallocated);
+		grow_array(mctx, s->tlss, s->count, s->tlssallocated);
+		grow_array(mctx, s->sources, s->count, s->sourcesallocated);
 
-		addrs[i] = *cfg_obj_assockaddr(addr);
+		s->addrs[s->count] = *cfg_obj_assockaddr(addr);
 
-		result = named_config_getname(mctx, key, &keys[i]);
+		result = named_config_getname(mctx, key, &s->keys[s->count]);
 		if (result != ISC_R_SUCCESS) {
-			i++; /* Increment here so that cleanup on error works.
-			      */
-			goto cleanup;
+			goto out;
 		}
 
-		result = named_config_getname(mctx, tls, &tlss[i]);
+		/*
+		 * The `key` is not provided for this address, so, if we're
+		 * inside a named list, get the `key` provided at the point the
+		 * list is used.
+		 */
+		if (s->keys[s->count] == NULL && listkey != NULL) {
+			result = named_config_getname(mctx, listkey,
+						      &s->keys[s->count]);
+			if (result != ISC_R_SUCCESS) {
+				goto out;
+			}
+		}
+
+		result = named_config_getname(mctx, tls, &s->tlss[s->count]);
 		if (result != ISC_R_SUCCESS) {
-			i++; /* Increment here so that cleanup on error works.
-			      */
-			goto cleanup;
+			goto out;
+		}
+
+		/*
+		 * The `tls` is not provided for this address, so, if we're
+		 * inside a named list, get the `tls` provided at the point the
+		 * named list is used.
+		 */
+		if (s->tlss[s->count] == NULL && listtls != NULL) {
+			result = named_config_getname(mctx, listtls,
+						      &s->tlss[s->count]);
 		}
 
 		/* If the port is unset, take it from one of the upper levels */
-		if (isc_sockaddr_getport(&addrs[i]) == 0) {
+		if (isc_sockaddr_getport(&s->addrs[s->count]) == 0) {
 			in_port_t addr_port = port;
 
 			/* If unset, use the default port or tls-port */
 			if (addr_port == 0) {
-				if (tlss[i] != NULL) {
-					addr_port = def_tlsport;
+				if (s->tlss[s->count] != NULL) {
+					addr_port = deftlsport;
 				} else {
-					addr_port = def_port;
+					addr_port = defport;
 				}
 			}
 
-			isc_sockaddr_setport(&addrs[i], addr_port);
+			isc_sockaddr_setport(&s->addrs[s->count], addr_port);
 		}
 
-		switch (isc_sockaddr_pf(&addrs[i])) {
+		switch (isc_sockaddr_pf(&s->addrs[s->count])) {
 		case PF_INET:
-			sources[i] = src4;
+			s->sources[s->count] = src4;
 			break;
 		case PF_INET6:
-			sources[i] = src6;
+			s->sources[s->count] = src6;
 			break;
 		default:
-			i++; /* Increment here so that cleanup on error works.
-			      */
 			result = ISC_R_NOTIMPLEMENTED;
-			goto cleanup;
+			goto out;
 		}
 
-		i++;
-	}
-	if (pushed != 0) {
-		pushed--;
-		element = stack[pushed].element;
-		port = stack[pushed].port;
-		src4 = stack[pushed].src4;
-		src6 = stack[pushed].src6;
-		goto resume;
+		s->count++;
 	}
 
-	shrink_array(mctx, addrs, i, addrcount);
-	shrink_array(mctx, keys, i, keycount);
-	shrink_array(mctx, tlss, i, tlscount);
-	shrink_array(mctx, sources, i, srccount);
-
-	if (lists != NULL) {
-		isc_mem_cput(mctx, lists, listcount, sizeof(lists[0]));
+out:
+	if (result != ISC_R_SUCCESS) {
+		/*
+		 * Reaching this point without success means we were in the
+		 * middle of adding a new entry, so it needs to be counted for
+		 * correctly free `s.keys` and `s.tlss` (as they potentially
+		 * added a new element right before something fails)
+		 */
+		s->count++;
 	}
-	if (stack != NULL) {
-		isc_mem_cput(mctx, stack, stackcount, sizeof(stack[0]));
+	return result;
+}
+
+isc_result_t
+named_config_getipandkeylist(const cfg_obj_t *config, const cfg_obj_t *list,
+			     isc_mem_t *mctx, dns_ipkeylist_t *ipkl) {
+	isc_result_t result;
+	in_port_t def_port;
+	in_port_t def_tlsport;
+	getipandkeylist_state_t s = {};
+
+	REQUIRE(ipkl != NULL);
+	REQUIRE(ipkl->count == 0);
+	REQUIRE(ipkl->addrs == NULL);
+	REQUIRE(ipkl->keys == NULL);
+	REQUIRE(ipkl->tlss == NULL);
+	REQUIRE(ipkl->labels == NULL);
+	REQUIRE(ipkl->allocated == 0);
+
+	/*
+	 * Get system defaults.
+	 */
+	CHECK(named_config_getport(config, "port", &def_port));
+
+	CHECK(named_config_getport(config, "tls-port", &def_tlsport));
+
+	/*
+	 * Process the (nested) list(s).
+	 */
+	CHECK(getipandkeylist(def_port, def_tlsport, config, list, (in_port_t)0,
+			      NULL, NULL, mctx, &s));
+
+	shrink_array(mctx, s.addrs, s.count, s.addrsallocated);
+	shrink_array(mctx, s.keys, s.count, s.keysallocated);
+	shrink_array(mctx, s.tlss, s.count, s.tlssallocated);
+	shrink_array(mctx, s.sources, s.count, s.sourcesallocated);
+
+	ipkl->addrs = s.addrs;
+	ipkl->keys = s.keys;
+	ipkl->tlss = s.tlss;
+	ipkl->sources = s.sources;
+	ipkl->count = s.count;
+
+	INSIST(s.addrsallocated == s.keysallocated);
+	INSIST(s.addrsallocated == s.tlssallocated);
+	INSIST(s.addrsallocated == s.sourcesallocated);
+	ipkl->allocated = s.addrsallocated;
+
+	if (s.seen != NULL) {
+		/*
+		 * `s.seen` is not shrinked (no point, as it's deleted right
+		 * away anyway), so we need to use `s.seenallocated` to
+		 * correctly free the array.
+		 */
+		isc_mem_cput(mctx, s.seen, s.seenallocated, sizeof(s.seen[0]));
 	}
-
-	INSIST(keycount == addrcount);
-	INSIST(tlscount == addrcount);
-	INSIST(srccount == addrcount);
-
-	ipkl->addrs = addrs;
-	ipkl->keys = keys;
-	ipkl->tlss = tlss;
-	ipkl->sources = sources;
-	ipkl->count = addrcount;
-	ipkl->allocated = addrcount;
 
 	return ISC_R_SUCCESS;
 
 cleanup:
-	if (addrs != NULL) {
-		isc_mem_cput(mctx, addrs, addrcount, sizeof(addrs[0]));
+	/*
+	 * Because we didn't shrinked the array back in this path, we need to
+	 * use `s.*allocated` to correctly free the allocated arrays.
+	 */
+	if (s.addrs != NULL) {
+		isc_mem_cput(mctx, s.addrs, s.count, sizeof(s.addrs[0]));
 	}
-	if (keys != NULL) {
-		for (size_t j = 0; j < i; j++) {
-			if (keys[j] == NULL) {
+	if (s.keys != NULL) {
+		for (size_t i = 0; i < s.count; i++) {
+			if (s.keys[i] == NULL) {
 				continue;
 			}
-			if (dns_name_dynamic(keys[j])) {
-				dns_name_free(keys[j], mctx);
+			if (dns_name_dynamic(s.keys[i])) {
+				dns_name_free(s.keys[i], mctx);
 			}
-			isc_mem_put(mctx, keys[j], sizeof(*keys[j]));
+			isc_mem_put(mctx, s.keys[i], sizeof(*s.keys[i]));
 		}
-		isc_mem_cput(mctx, keys, keycount, sizeof(keys[0]));
+		isc_mem_cput(mctx, s.keys, s.keysallocated, sizeof(s.keys[0]));
 	}
-	if (tlss != NULL) {
-		for (size_t j = 0; j < i; j++) {
-			if (tlss[j] == NULL) {
+	if (s.tlss != NULL) {
+		for (size_t i = 0; i < s.count; i++) {
+			if (s.tlss[i] == NULL) {
 				continue;
 			}
-			if (dns_name_dynamic(tlss[j])) {
-				dns_name_free(tlss[j], mctx);
+			if (dns_name_dynamic(s.tlss[i])) {
+				dns_name_free(s.tlss[i], mctx);
 			}
-			isc_mem_put(mctx, tlss[j], sizeof(*tlss[j]));
+			isc_mem_put(mctx, s.tlss[i], sizeof(*s.tlss[i]));
 		}
-		isc_mem_cput(mctx, tlss, tlscount, sizeof(tlss[0]));
+		isc_mem_cput(mctx, s.tlss, s.tlssallocated, sizeof(s.tlss[0]));
 	}
-	if (sources != NULL) {
-		isc_mem_cput(mctx, sources, srccount, sizeof(sources[0]));
+	if (s.sources != NULL) {
+		isc_mem_cput(mctx, s.sources, s.sourcesallocated,
+			     sizeof(s.sources[0]));
 	}
-	if (lists != NULL) {
-		isc_mem_cput(mctx, lists, listcount, sizeof(lists[0]));
+	if (s.seen != NULL) {
+		isc_mem_cput(mctx, s.seen, s.seenallocated, sizeof(s.seen[0]));
 	}
-	if (stack != NULL) {
-		isc_mem_cput(mctx, stack, stackcount, sizeof(stack[0]));
-	}
+
 	return result;
 }
 
@@ -660,7 +692,6 @@ named_config_getkeyalgorithm(const char *str, unsigned int *typep,
 	int i;
 	size_t len = 0;
 	uint16_t bits;
-	isc_result_t result;
 
 	for (i = 0; algorithms[i].str != NULL; i++) {
 		len = strlen(algorithms[i].str);
@@ -675,10 +706,7 @@ named_config_getkeyalgorithm(const char *str, unsigned int *typep,
 		return ISC_R_NOTFOUND;
 	}
 	if (str[len] == '-') {
-		result = isc_parse_uint16(&bits, str + len + 1, 10);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(isc_parse_uint16(&bits, str + len + 1, 10));
 		if (bits > algorithms[i].size) {
 			return ISC_R_RANGE;
 		}

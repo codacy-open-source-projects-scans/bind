@@ -44,13 +44,6 @@
 
 #include "check-tool.h"
 
-#define CHECK(r)                             \
-	do {                                 \
-		result = (r);                \
-		if (result != ISC_R_SUCCESS) \
-			goto cleanup;        \
-	} while (0)
-
 /*% usage */
 ISC_NORETURN static void
 usage(void);
@@ -115,7 +108,6 @@ get_checknames(const cfg_obj_t **maps, const cfg_obj_t **obj) {
 
 static isc_result_t
 configure_hint(const char *zfile, const char *zclass) {
-	isc_result_t result;
 	dns_db_t *db = NULL;
 	dns_rdataclass_t rdclass;
 	isc_textregion_t r;
@@ -126,15 +118,8 @@ configure_hint(const char *zfile, const char *zclass) {
 
 	r.base = UNCONST(zclass);
 	r.length = strlen(zclass);
-	result = dns_rdataclass_fromtext(&rdclass, &r);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
-
-	result = dns_rootns_create(isc_g_mctx, rdclass, zfile, &db);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(dns_rdataclass_fromtext(&rdclass, &r));
+	RETERR(dns_rootns_create(isc_g_mctx, rdclass, zfile, &db));
 
 	dns_db_detach(&db);
 	return ISC_R_SUCCESS;
@@ -512,7 +497,7 @@ load_zones_fromconfig(const cfg_obj_t *config, bool list_zones) {
 		}
 
 		if (dns_rdataclass_ismeta(viewclass)) {
-			CHECK(ISC_R_FAILURE);
+			CLEANUP(ISC_R_FAILURE);
 		}
 
 		dns_rdataclass_format(viewclass, buf, sizeof(buf));
@@ -546,11 +531,11 @@ parse_builtin(cfg_obj_t **defaultconfig) {
 			     sizeof(common_named_defaultconf) - 1);
 	isc_buffer_add(&b, sizeof(common_named_defaultconf) - 1);
 
-	return cfg_parse_buffer(
-		isc_g_mctx, &b, __FILE__, 0, &cfg_type_namedconf,
-		CFG_PCTX_NODEPRECATED | CFG_PCTX_NOOBSOLETE |
-			CFG_PCTX_NOEXPERIMENTAL | CFG_PCTX_BUILTIN,
-		defaultconfig);
+	return cfg_parse_buffer(&b, __FILE__, 0, &cfg_type_namedconf,
+				CFG_PCTX_NODEPRECATED | CFG_PCTX_NOOBSOLETE |
+					CFG_PCTX_NOEXPERIMENTAL |
+					CFG_PCTX_BUILTIN,
+				defaultconfig);
 }
 
 static void
@@ -698,7 +683,7 @@ main(int argc, char **argv) {
 			fprintf(stderr, "%s: unhandled option -%c\n",
 				isc_commandline_progname,
 				isc_commandline_option);
-			CHECK(ISC_R_FAILURE);
+			CLEANUP(ISC_R_FAILURE);
 		}
 	}
 
@@ -710,12 +695,12 @@ main(int argc, char **argv) {
 	if (((flags & CFG_PRINTER_XKEY) != 0) && !print) {
 		fprintf(stderr, "%s: -x cannot be used without -p\n",
 			isc_commandline_progname);
-		CHECK(ISC_R_FAILURE);
+		CLEANUP(ISC_R_FAILURE);
 	}
 	if (print && list_zones) {
 		fprintf(stderr, "%s: -l cannot be used with -p\n",
 			isc_commandline_progname);
-		CHECK(ISC_R_FAILURE);
+		CLEANUP(ISC_R_FAILURE);
 	}
 
 	if (isc_commandline_index + 1 < argc) {
@@ -729,8 +714,8 @@ main(int argc, char **argv) {
 	}
 
 	CHECK(setup_logging(stdout));
-	CHECK(cfg_parse_file(isc_g_mctx, conffile, &cfg_type_namedconf,
-			     parserflags, &config));
+	CHECK(cfg_parse_file(conffile, &cfg_type_namedconf, parserflags,
+			     &config));
 	CHECK(isccfg_check_namedconf(config, checkflags, isc_g_mctx));
 	if (load_zones || list_zones) {
 		CHECK(load_zones_fromconfig(config, list_zones));

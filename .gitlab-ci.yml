@@ -204,8 +204,8 @@ stages:
 
 # Alpine Linux
 
-.alpine-3.22-amd64: &alpine_3_22_amd64_image
-  image: "$CI_REGISTRY_IMAGE:alpine-3.22-amd64"
+.alpine-3.23-amd64: &alpine_3_23_amd64_image
+  image: "$CI_REGISTRY_IMAGE:alpine-3.23-amd64"
   <<: *linux_amd64
 
 # AlmaLinux
@@ -252,16 +252,16 @@ stages:
 
 # Fedora
 
-.tsan-fedora-42-amd64: &tsan_fedora_42_amd64_image
-  image: "$CI_REGISTRY_IMAGE:tsan-fedora-42-amd64"
+.tsan-fedora-43-amd64: &tsan_fedora_43_amd64_image
+  image: "$CI_REGISTRY_IMAGE:tsan-fedora-43-amd64"
   <<: *linux_amd64
 
-.fedora-42-amd64: &fedora_42_amd64_image
-  image: "$CI_REGISTRY_IMAGE:fedora-42-amd64"
+.fedora-43-amd64: &fedora_43_amd64_image
+  image: "$CI_REGISTRY_IMAGE:fedora-43-amd64"
   <<: *linux_amd64
 
-.fedora-42-arm64: &fedora_42_arm64_image
-  image: "$CI_REGISTRY_IMAGE:fedora-42-arm64"
+.fedora-43-arm64: &fedora_43_arm64_image
+  image: "$CI_REGISTRY_IMAGE:fedora-43-arm64"
   <<: *linux_arm64
 
 # Ubuntu
@@ -381,6 +381,7 @@ stages:
       -Ddeveloper=enabled
       -Dleak-detection=enabled
       -Doptimization=1
+      -Dnamed-lto=thin
       $EXTRA_CONFIGURE
       build
 
@@ -670,7 +671,7 @@ vulture:
   <<: *python_triggering_rules
   needs: []
   script:
-    - vulture --exclude "*ans.py,conftest.py,isctest" --ignore-names "after_servers_start,bootstrap,pytestmark" bin/tests/system/
+    - vulture --exclude "*ans.py,conftest.py,re_compile_checker.py,isctest" --ignore-names "after_servers_start,bootstrap,pytestmark" bin/tests/system/
 
 ci-variables:
   <<: *precheck_job
@@ -779,7 +780,7 @@ pylint:
   script:
     - pylint --rcfile $CI_PROJECT_DIR/.pylintrc $(git ls-files '*.py' | grep -vE '(ans\.py|dangerfile\.py|^bin/tests/system/|^contrib/)')
       # Ignore Pylint wrong-import-position error in system test to enable use of pytest.importorskip
-    - pylint --rcfile $CI_PROJECT_DIR/.pylintrc --disable=wrong-import-position $(git ls-files 'bin/tests/system/*.py' | grep -vE '(ans\.py|vulture_ignore_list\.py)')
+    - pylint --rcfile $CI_PROJECT_DIR/.pylintrc --load-plugins re_compile_checker --disable=wrong-import-position $(git ls-files 'bin/tests/system/*.py' | grep -vE '(ans\.py|vulture_ignore_list\.py)')
 
 reuse:
   <<: *precheck_job
@@ -947,28 +948,28 @@ cross-version-config-tests:
     when: always
   allow_failure: true
 
-# Jobs for regular GCC builds on Alpine Linux 3.22 (amd64)
+# Jobs for regular GCC builds on Alpine Linux 3.23 (amd64)
 
-gcc:alpine3.22:amd64:
+gcc:alpine3.23:amd64:
   variables:
     CC: gcc
     CFLAGS: "${CFLAGS_COMMON}"
     EXTRA_CONFIGURE: "${WITHOUT_LIBEDIT}"
-  <<: *alpine_3_22_amd64_image
+  <<: *alpine_3_23_amd64_image
   <<: *build_job
 
-system:gcc:alpine3.22:amd64:
-  <<: *alpine_3_22_amd64_image
+system:gcc:alpine3.23:amd64:
+  <<: *alpine_3_23_amd64_image
   <<: *system_test_job
   needs:
-    - job: gcc:alpine3.22:amd64
+    - job: gcc:alpine3.23:amd64
       artifacts: true
 
-unit:gcc:alpine3.22:amd64:
-  <<: *alpine_3_22_amd64_image
+unit:gcc:alpine3.23:amd64:
+  <<: *alpine_3_23_amd64_image
   <<: *unit_test_job
   needs:
-    - job: gcc:alpine3.22:amd64
+    - job: gcc:alpine3.23:amd64
       artifacts: true
 
 # Jobs for regular GCC builds on Alma Linux 8 (amd64)
@@ -1421,27 +1422,27 @@ unit:gcc:noble:amd64:
     - job: gcc:noble:amd64
       artifacts: true
 
-# Jobs for ASAN builds on Fedora 42 (amd64)
+# Jobs for ASAN builds on Fedora 43 (amd64)
 
 gcc:asan:
   variables:
     CC: gcc
     CFLAGS: "${CFLAGS_COMMON}"
     EXTRA_CONFIGURE: "-Db_sanitize=address,undefined -Didn=enabled -Djemalloc=disabled -Dtracing=disabled"
-  <<: *fedora_42_amd64_image
+  <<: *fedora_43_amd64_image
   <<: *build_job
 
 system:gcc:asan:
   variables:
     LSAN_OPTIONS: "suppressions=$CI_PROJECT_DIR/suppr-lsan.txt"
-  <<: *fedora_42_amd64_image
+  <<: *fedora_43_amd64_image
   <<: *system_test_job
   needs:
     - job: gcc:asan
       artifacts: true
 
 unit:gcc:asan:
-  <<: *fedora_42_amd64_image
+  <<: *fedora_43_amd64_image
   <<: *unit_test_job
   needs:
     - job: gcc:asan
@@ -1473,7 +1474,7 @@ unit:clang:asan:
     - job: clang:asan
       artifacts: true
 
-# Jobs for TSAN builds on Fedora 42 (amd64)
+# Jobs for TSAN builds on Fedora 43 (amd64)
 
 gcc:tsan:
   variables:
@@ -1481,13 +1482,13 @@ gcc:tsan:
     CFLAGS: "${CFLAGS_COMMON} -Wno-stringop-overread"
     LDFLAGS: "-Wl,--disable-new-dtags"
     EXTRA_CONFIGURE: "${TSAN_CONFIGURE_FLAGS_COMMON}"
-  <<: *tsan_fedora_42_amd64_image
+  <<: *tsan_fedora_43_amd64_image
   <<: *build_job
 
 system:gcc:tsan:
   variables:
     TSAN_OPTIONS: "${TSAN_OPTIONS_FEDORA}"
-  <<: *tsan_fedora_42_amd64_image
+  <<: *tsan_fedora_43_amd64_image
   <<: *system_test_tsan_job
   <<: *extra_system_tests_triggering_rules
   needs:
@@ -1497,7 +1498,7 @@ system:gcc:tsan:
 unit:gcc:tsan:
   variables:
     TSAN_OPTIONS: "${TSAN_OPTIONS_FEDORA}"
-  <<: *tsan_fedora_42_amd64_image
+  <<: *tsan_fedora_43_amd64_image
   <<: *unit_test_tsan_job
   <<: *api_pipelines_schedules_tags_triggers_web_triggering_rules
   needs:
@@ -1511,7 +1512,7 @@ clang:tsan:
     CC: "${CLANG}"
     CFLAGS: "${CFLAGS_COMMON}"
     LDFLAGS: "-Wl,--disable-new-dtags"
-    EXTRA_CONFIGURE: "${TSAN_CONFIGURE_FLAGS_COMMON} -Db_lundef=false -Dnamed-lto=off --native-file ci/clang-trixie.ini"
+    EXTRA_CONFIGURE: "${TSAN_CONFIGURE_FLAGS_COMMON} -Db_lundef=false -Dnamed-lto=disabled --native-file ci/clang-trixie.ini"
   <<: *build_job
 
 system:clang:tsan:
@@ -1985,7 +1986,7 @@ respdiff:tsan:
     CC: "${CLANG}"
     CFLAGS: "${CFLAGS_COMMON}"
     LDFLAGS: "-Wl,--disable-new-dtags"
-    EXTRA_CONFIGURE: "${TSAN_CONFIGURE_FLAGS_COMMON} -Dnamed-lto=off -Db_lundef=false"
+    EXTRA_CONFIGURE: "${TSAN_CONFIGURE_FLAGS_COMMON} -Dnamed-lto=disabled -Db_lundef=false"
     MAX_DISAGREEMENTS_PERCENTAGE: "0.3"
     TSAN_OPTIONS: "${TSAN_OPTIONS_DEBIAN}"
   script:
@@ -2031,6 +2032,7 @@ respdiff:recent-named:
     CFLAGS: "${CFLAGS_COMMON} -DISC_TRACK_PTHREADS_OBJECTS"
     EXTRA_CONFIGURE: "-Doptimization=g"
     MAX_DISAGREEMENTS_PERCENTAGE: "0.1"
+  allow_failure: true  # GL!11293
 
 # Performance tests
 
@@ -2103,7 +2105,7 @@ stress-test-child-pipeline:
 # Simple reproductibilty test, needs an image with meson >=1.6.0
 reproducible-build:
   <<: *default_triggering_rules
-  <<: *alpine_3_22_amd64_image
+  <<: *alpine_3_23_amd64_image
   stage: postcheck
   needs: []
   variables:

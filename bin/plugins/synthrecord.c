@@ -21,14 +21,6 @@
 
 #include <ns/hooks.h>
 
-#define CHECK(op)                              \
-	do {                                   \
-		result = (op);                 \
-		if (result != ISC_R_SUCCESS) { \
-			goto cleanup;          \
-		}                              \
-	} while (0)
-
 #define DEFAULT_TTL 300
 
 typedef enum { UNDEFINED, FORWARD, REVERSE } synthrecord_mode_t;
@@ -70,7 +62,6 @@ synthrecord_reverseanswer(synthrecord_t *inst, isc_netaddr_t *na,
 	isc_buffer_t addrb;
 	char addrbdata[DNS_NAME_FORMATSIZE];
 	isc_region_t addrr;
-	isc_result_t result;
 
 	REQUIRE(DNS_NAME_VALID(synthname));
 	REQUIRE(na->family == AF_INET || na->family == AF_INET6);
@@ -79,10 +70,7 @@ synthrecord_reverseanswer(synthrecord_t *inst, isc_netaddr_t *na,
 	isc_buffer_copyregion(&b, &inst->prefix);
 
 	isc_buffer_init(&addrb, addrbdata, sizeof(addrbdata));
-	result = isc_netaddr_totext(na, &addrb);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(isc_netaddr_totext(na, &addrb));
 
 	/*
 	 * IDN compatibility, as an IPv6 begining or ending with `::` will be
@@ -402,10 +390,10 @@ synthrecord_entry(void *arg, void *cbdata, isc_result_t *resp) {
 }
 
 static cfg_clausedef_t synthrecord_cfgclauses[] = {
-	{ "prefix", &cfg_type_astring, 0 },
-	{ "origin", &cfg_type_astring, 0 },
-	{ "allow-synth", &cfg_type_bracketed_aml, 0 },
-	{ "ttl", &cfg_type_uint32, 0 }
+	{ "prefix", &cfg_type_astring, 0, NULL },
+	{ "origin", &cfg_type_astring, 0, NULL },
+	{ "allow-synth", &cfg_type_bracketed_aml, 0, NULL },
+	{ "ttl", &cfg_type_uint32, 0, NULL }
 };
 
 static cfg_clausedef_t *synthrecord_cfgparamsclausesets[] = {
@@ -420,7 +408,6 @@ static cfg_type_t synthrecord_cfgparams = {
 static isc_result_t
 synthrecord_initprefix(synthrecord_t *inst, const cfg_obj_t *synthrecordcfg) {
 	isc_result_t result;
-	size_t len;
 	const char *base = NULL;
 	const cfg_obj_t *obj = NULL;
 
@@ -431,9 +418,7 @@ synthrecord_initprefix(synthrecord_t *inst, const cfg_obj_t *synthrecordcfg) {
 		return result;
 	}
 
-	len = obj->value.string.length;
-	base = obj->value.string.base;
-
+	base = obj->value.string;
 	if (strstr(base, ".") != NULL) {
 		isc_log_write(NS_LOGCATEGORY_GENERAL, NS_LOGMODULE_HOOKS,
 			      ISC_LOG_ERROR,
@@ -442,10 +427,9 @@ synthrecord_initprefix(synthrecord_t *inst, const cfg_obj_t *synthrecordcfg) {
 		return ISC_R_UNEXPECTEDTOKEN;
 	}
 
-	inst->prefix = (isc_region_t){
-		.base = isc_mem_allocate(inst->mctx, len), .length = len
-	};
-	memmove(inst->prefix.base, base, len);
+	inst->prefix = (isc_region_t){ .base = (unsigned char *)isc_mem_strdup(
+					       inst->mctx, base),
+				       .length = strlen(base) };
 
 	/*
 	 * Avoid dynamically lower-casing the prefix when parsing the
@@ -476,11 +460,8 @@ synthrecord_initorigin(synthrecord_t *inst, const cfg_obj_t *synthrecordcfg,
 	dns_name_init(&inst->origin);
 	if (result == ISC_R_SUCCESS) {
 		originstr = cfg_obj_asstring(obj);
-		result = dns_name_fromstring(&inst->origin, originstr, NULL, 0,
-					     inst->mctx);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(dns_name_fromstring(&inst->origin, originstr, NULL, 0,
+					   inst->mctx));
 
 		if (!dns_name_isabsolute(&inst->origin)) {
 			isc_log_write(NS_LOGCATEGORY_GENERAL,
@@ -525,11 +506,8 @@ synthrecord_parseallowsynth(synthrecord_t *inst, const cfg_obj_t *cfg,
 		return result;
 	}
 
-	result = cfg_acl_fromconfig(obj, cfg, aclctx, inst->mctx, 0,
-				    &inst->allowedsynth);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(cfg_acl_fromconfig(obj, cfg, aclctx, inst->mctx, 0,
+				  &inst->allowedsynth));
 
 	for (unsigned int i = 0; i < inst->allowedsynth->length; i++) {
 		switch (inst->allowedsynth->elements[i].type) {
@@ -572,15 +550,14 @@ synthrecord_parseconfig(synthrecord_t *inst, const char *parameters,
 			unsigned long cfgline, cfg_aclconfctx_t *aclctx,
 			const dns_name_t *zname) {
 	isc_result_t result;
-	isc_mem_t *mctx = inst->mctx;
 	cfg_obj_t *synthrecordcfg = NULL;
 	isc_buffer_t b;
 
 	isc_buffer_constinit(&b, parameters, strlen(parameters));
 	isc_buffer_add(&b, strlen(parameters));
 
-	CHECK(cfg_parse_buffer(mctx, &b, cfgfile, cfgline,
-			       &synthrecord_cfgparams, 0, &synthrecordcfg));
+	CHECK(cfg_parse_buffer(&b, cfgfile, cfgline, &synthrecord_cfgparams, 0,
+			       &synthrecordcfg));
 
 	synthrecord_setconfigmode(inst, zname);
 	CHECK(synthrecord_initorigin(inst, synthrecordcfg, zname));

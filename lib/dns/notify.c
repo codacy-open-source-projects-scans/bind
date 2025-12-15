@@ -347,10 +347,7 @@ notify_send_toaddr(void *arg) {
 		goto cleanup;
 	}
 
-	result = notify_createmessage(notify, &message);
-	if (result != ISC_R_SUCCESS) {
-		goto cleanup;
-	}
+	CHECK(notify_createmessage(notify, &message));
 
 	if (notify->key != NULL) {
 		/* Transfer ownership of key */
@@ -510,11 +507,6 @@ notify_queue(dns_notify_t *notify, bool startup, bool dequeue) {
 }
 
 isc_result_t
-dns_notify_dequeue(dns_notify_t *notify, bool startup) {
-	return notify_queue(notify, startup, true);
-}
-
-isc_result_t
 dns_notify_queue(dns_notify_t *notify, bool startup) {
 	return notify_queue(notify, startup, false);
 }
@@ -659,10 +651,7 @@ notify_send(dns_notify_t *notify) {
 			isc_sockaddr_any6(&newnotify->src);
 		}
 		startup = ((notify->flags & DNS_NOTIFY_STARTUP) != 0);
-		result = dns_notify_queue(newnotify, startup);
-		if (result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
+		CHECK(dns_notify_queue(newnotify, startup));
 		newnotify = NULL;
 	}
 
@@ -730,7 +719,7 @@ dns_notify_find_address(dns_notify_t *notify) {
 
 	result = dns_adb_createfind(adb, loop, process_notify_adb_event, notify,
 				    &notify->ns, options, 0, view->dstport, 0,
-				    NULL, NULL, &notify->find);
+				    NULL, NULL, NULL, &notify->find);
 	dns_adb_detach(&adb);
 
 	/* Something failed? */

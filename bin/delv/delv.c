@@ -84,13 +84,6 @@
 
 #include <irs/resconf.h>
 
-#define CHECK(r)                             \
-	do {                                 \
-		result = (r);                \
-		if (result != ISC_R_SUCCESS) \
-			goto cleanup;        \
-	} while (0)
-
 #define MAXNAME (DNS_NAME_MAXTEXT + 1)
 
 #define MAX_QUERIES  50
@@ -164,8 +157,8 @@ static char anchortext[] = TRUST_ANCHORS;
 
 static cfg_clausedef_t delv_clauses[] = { { "builtin-trust-anchors",
 					    &cfg_type_builtin_dnsseckeys,
-					    CFG_CLAUSEFLAG_MULTI },
-					  { NULL, NULL, 0 } };
+					    CFG_CLAUSEFLAG_MULTI, NULL },
+					  { NULL, NULL, 0, NULL } };
 static cfg_clausedef_t *delv_clausesets[] = { delv_clauses, NULL };
 static cfg_type_t delv_type = { "delv", cfg_parse_mapbody, NULL,
 				NULL,	&cfg_rep_map,	   delv_clausesets };
@@ -683,8 +676,7 @@ key_fromconfig(const cfg_obj_t *key, dns_client_t *client, dns_view_t *toview) {
 			delv_log(ISC_LOG_ERROR,
 				 "key '%s': invalid initialization method '%s'",
 				 keynamestr, atstr);
-			result = ISC_R_FAILURE;
-			goto cleanup;
+			CLEANUP(ISC_R_FAILURE);
 		}
 	}
 
@@ -692,13 +684,13 @@ key_fromconfig(const cfg_obj_t *key, dns_client_t *client, dns_view_t *toview) {
 	isc_buffer_init(&rrdatabuf, rrdata, sizeof(rrdata));
 
 	if (rdata1 > 0xffff) {
-		CHECK(ISC_R_RANGE);
+		CLEANUP(ISC_R_RANGE);
 	}
 	if (rdata2 > 0xff) {
-		CHECK(ISC_R_RANGE);
+		CLEANUP(ISC_R_RANGE);
 	}
 	if (rdata3 > 0xff) {
-		CHECK(ISC_R_RANGE);
+		CLEANUP(ISC_R_RANGE);
 	}
 
 	switch (anchortype) {
@@ -749,17 +741,17 @@ key_fromconfig(const cfg_obj_t *key, dns_client_t *client, dns_view_t *toview) {
 		switch (ds.digest_type) {
 		case DNS_DSDIGEST_SHA1:
 			if (r.length != ISC_SHA1_DIGESTLENGTH) {
-				CHECK(ISC_R_UNEXPECTEDEND);
+				CLEANUP(ISC_R_UNEXPECTEDEND);
 			}
 			break;
 		case DNS_DSDIGEST_SHA256:
 			if (r.length != ISC_SHA256_DIGESTLENGTH) {
-				CHECK(ISC_R_UNEXPECTEDEND);
+				CLEANUP(ISC_R_UNEXPECTEDEND);
 			}
 			break;
 		case DNS_DSDIGEST_SHA384:
 			if (r.length != ISC_SHA384_DIGESTLENGTH) {
-				CHECK(ISC_R_UNEXPECTEDEND);
+				CLEANUP(ISC_R_UNEXPECTEDEND);
 			}
 			break;
 		}
@@ -837,8 +829,8 @@ setup_dnsseckeys(dns_client_t *client, dns_view_t *toview) {
 			fatal("Unable to read key file '%s'", anchorfile);
 		}
 
-		result = cfg_parse_file(isc_g_mctx, anchorfile,
-					&cfg_type_bindkeys, 0, &bindkeys);
+		result = cfg_parse_file(anchorfile, &cfg_type_bindkeys, 0,
+					&bindkeys);
 		if (result != ISC_R_SUCCESS) {
 			fatal("Unable to load keys from '%s'", anchorfile);
 		}
@@ -850,8 +842,8 @@ setup_dnsseckeys(dns_client_t *client, dns_view_t *toview) {
 
 		isc_buffer_init(&b, anchortext, sizeof(anchortext) - 1);
 		isc_buffer_add(&b, sizeof(anchortext) - 1);
-		result = cfg_parse_buffer(isc_g_mctx, &b, NULL, 0, &delv_type,
-					  0, &bindkeys);
+		result = cfg_parse_buffer(&b, NULL, 0, &delv_type, 0,
+					  &bindkeys);
 		if (result != ISC_R_SUCCESS) {
 			fatal("Unable to parse built-in keys");
 		}
@@ -1765,15 +1757,8 @@ reverse_octets(const char *in, char **p, char *end) {
 	char *dot = strchr(in, '.');
 	int len;
 	if (dot != NULL) {
-		isc_result_t result;
-		result = reverse_octets(dot + 1, p, end);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
-		result = append_str(".", 1, p, end);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(reverse_octets(dot + 1, p, end));
+		RETERR(append_str(".", 1, p, end));
 		len = (int)(dot - in);
 	} else {
 		len = strlen(in);
@@ -1784,7 +1769,6 @@ reverse_octets(const char *in, char **p, char *end) {
 static isc_result_t
 get_reverse(char *reverse, size_t len, char *value, bool strict) {
 	int r;
-	isc_result_t result;
 	isc_netaddr_t addr;
 
 	addr.family = AF_INET6;
@@ -1795,10 +1779,7 @@ get_reverse(char *reverse, size_t len, char *value, bool strict) {
 		dns_name_t *name;
 
 		name = dns_fixedname_initname(&fname);
-		result = dns_byaddr_createptrname(&addr, name);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(dns_byaddr_createptrname(&addr, name));
 		dns_name_format(name, reverse, (unsigned int)len);
 		return ISC_R_SUCCESS;
 	} else {
@@ -1815,14 +1796,8 @@ get_reverse(char *reverse, size_t len, char *value, bool strict) {
 		if (strict && inet_pton(AF_INET, value, &addr.type.in) != 1) {
 			return DNS_R_BADDOTTEDQUAD;
 		}
-		result = reverse_octets(value, &p, end);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
-		result = append_str(".in-addr.arpa.", 15, &p, end);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(reverse_octets(value, &p, end));
+		RETERR(append_str(".in-addr.arpa.", 15, &p, end));
 		return ISC_R_SUCCESS;
 	}
 }

@@ -20,6 +20,9 @@ To build on a Unix or Linux system, use:
 
     $ meson setup build-dir
     $ meson compile -C build-dir
+    $ cd build-dir
+    $ meson install  # by default installs into /usr/local
+    $ ldconfig
 
 Several environment variables affect compilation, and they can be set
 before running ``meson setup``. The most significant ones are:
@@ -89,9 +92,11 @@ required when in use.
 
 To further improve performance, compilation with link-time optimization is
 recommended. This is enabled by default via the ``-Dnamed-lto`` option
-(default: ``thin``). Link-time optimization can be disabled if needed by
-using ``-Dnamed-lto=off``. The optimization level can be controlled with
-``-Dnamed-lto=thin`` or ``-Dnamed-lto=full``.
+(default: ``auto``). Link-time optimization can be disabled if needed by
+using ``-Dnamed-lto=disabled``. The optimization level can be controlled with
+``-Dnamed-lto=thin`` or ``-Dnamed-lto=full``. The ``auto`` option enables
+thin LTO when supported by the compiler and linker combination, and disables
+LTO otherwise.
 
 Link-time optimization requires close coordination between the compiler and
 the linker. Due to ``clang`` limitations, compiling ``named`` with ``clang``

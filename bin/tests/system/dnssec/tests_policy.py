@@ -62,15 +62,17 @@ def test_signatures_validity(ns3, templates):
 
     templates.render("ns3/named.conf", {"long_sigs": True})
     with ns3.watch_log_from_here() as watcher:
-        ns3.reconfigure(log=False)
-        watcher.wait_for_line("siginterval.example/IN (signed): sending notifies")
+        ns3.reconfigure()
+        watcher.wait_for_line(
+            "zone_needdump: zone siginterval.example/IN (signed): enter"
+        )
 
     res = isctest.query.tcp(msg, "10.53.0.3")
     after = next(filter(is_rrsig_soa, res.answer))
 
     assert after != before
 
-    ns3.rndc("sign siginterval.example", log=False)
+    ns3.rndc("sign siginterval.example")
 
     msg = isctest.query.create("siginterval.example.", "SOA")
     res = isctest.query.tcp(msg, "10.53.0.3")

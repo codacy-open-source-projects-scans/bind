@@ -19,6 +19,7 @@
 
 #include <isc/ascii.h>
 #include <isc/atomic.h>
+#include <isc/list.h>
 #include <isc/mem.h>
 #include <isc/region.h>
 #include <isc/result.h>
@@ -91,7 +92,6 @@ dns_rdatasetmethods_t dns_rdataslab_rdatasetmethods = {
 	.expire = rdataset_expire,
 	.clearprefetch = rdataset_clearprefetch,
 	.getownercase = rdataset_getownercase,
-	.getheader = rdataset_getheader,
 };
 
 /*% Note: the "const void *" are just to make qsort happy.  */
@@ -125,7 +125,7 @@ makeslab(dns_rdataset_t *rdataset, isc_mem_t *mctx, isc_region_t *region,
 	 * new buffer.
 	 */
 	if (rdataset->methods == &dns_rdataslab_rdatasetmethods) {
-		dns_slabheader_t *header = dns_rdataset_getheader(rdataset);
+		dns_slabheader_t *header = rdataset_getheader(rdataset);
 		buflen = dns_rdataslab_size(header);
 
 		rawbuf = isc_mem_get(mctx, buflen);
@@ -327,6 +327,7 @@ dns_rdataslab_fromrdataset(dns_rdataset_t *rdataset, isc_mem_t *mctx,
 			.typepair = typepair,
 			.trust = rdataset->trust,
 			.ttl = rdataset->ttl,
+			.dirtylink = ISC_LINK_INITIALIZER,
 		};
 	}
 
@@ -514,8 +515,7 @@ dns_rdataslab_merge(dns_slabheader_t *oheader, dns_slabheader_t *nheader,
 	 * than ncount, then we found such a duplicate.
 	 */
 	if (((flags & DNS_RDATASLAB_EXACT) != 0) && (tcount < ncount)) {
-		result = DNS_R_NOTEXACT;
-		goto cleanup;
+		CLEANUP(DNS_R_NOTEXACT);
 	}
 
 	/*
@@ -523,8 +523,7 @@ dns_rdataslab_merge(dns_slabheader_t *oheader, dns_slabheader_t *nheader,
 	 * FORCE flag isn't set, we're done.
 	 */
 	if (tcount == 0 && (flags & DNS_RDATASLAB_FORCE) == 0) {
-		result = DNS_R_UNCHANGED;
-		goto cleanup;
+		CLEANUP(DNS_R_UNCHANGED);
 	}
 
 	/* Add to tcount the total number of items from the old slab. */
@@ -535,13 +534,11 @@ dns_rdataslab_merge(dns_slabheader_t *oheader, dns_slabheader_t *nheader,
 
 	/* Single types can't have more than one RR. */
 	if (tcount > 1 && dns_rdatatype_issingleton(type)) {
-		result = DNS_R_SINGLETON;
-		goto cleanup;
+		CLEANUP(DNS_R_SINGLETON);
 	}
 
 	if (tcount > 0xffff) {
-		result = ISC_R_NOSPACE;
-		goto cleanup;
+		CLEANUP(ISC_R_NOSPACE);
 	}
 
 	/* Allocate the target buffer and copy the new slab's header */
@@ -677,8 +674,7 @@ dns_rdataslab_subtract(dns_slabheader_t *oheader, dns_slabheader_t *sheader,
 	 * duplicates.)
 	 */
 	if ((flags & DNS_RDATASLAB_EXACT) != 0 && rcount != scount) {
-		result = DNS_R_NOTEXACT;
-		goto cleanup;
+		CLEANUP(DNS_R_NOTEXACT);
 	}
 
 	/*
@@ -686,16 +682,14 @@ dns_rdataslab_subtract(dns_slabheader_t *oheader, dns_slabheader_t *sheader,
 	 * create a new buffer, just return.
 	 */
 	if (tcount == 0) {
-		result = DNS_R_NXRRSET;
-		goto cleanup;
+		CLEANUP(DNS_R_NXRRSET);
 	}
 
 	/*
 	 * If nothing is going to change, stop.
 	 */
 	if (rcount == 0) {
-		result = DNS_R_UNCHANGED;
-		goto cleanup;
+		CLEANUP(DNS_R_UNCHANGED);
 	}
 
 	/*
@@ -840,6 +834,8 @@ dns_slabheader_reset(dns_slabheader_t *h, dns_dbnode_t *node) {
 	atomic_init(&h->attributes, 0);
 	atomic_init(&h->last_refresh_fail_ts, 0);
 
+	ISC_LINK_INIT(h, dirtylink);
+
 	STATIC_ASSERT(sizeof(h->attributes) == 2,
 		      "The .attributes field of dns_slabheader_t needs to be "
 		      "16-bit int type exactly.");
@@ -852,6 +848,7 @@ dns_slabheader_new(isc_mem_t *mctx, dns_dbnode_t *node) {
 	h = isc_mem_get(mctx, sizeof(*h));
 	*h = (dns_slabheader_t){
 		.node = node,
+		.dirtylink = ISC_LINK_INITIALIZER,
 	};
 	return h;
 }
@@ -1122,7 +1119,7 @@ rdataset_getclosest(dns_rdataset_t *rdataset, dns_name_t *name,
 
 static void
 rdataset_settrust(dns_rdataset_t *rdataset, dns_trust_t trust) {
-	dns_slabheader_t *header = dns_rdataset_getheader(rdataset);
+	dns_slabheader_t *header = rdataset_getheader(rdataset);
 
 	rdataset->trust = trust;
 	atomic_store(&header->trust, trust);
@@ -1130,21 +1127,21 @@ rdataset_settrust(dns_rdataset_t *rdataset, dns_trust_t trust) {
 
 static void
 rdataset_expire(dns_rdataset_t *rdataset DNS__DB_FLARG) {
-	dns_slabheader_t *header = dns_rdataset_getheader(rdataset);
+	dns_slabheader_t *header = rdataset_getheader(rdataset);
 
 	dns_db_expiredata(header->node, header);
 }
 
 static void
 rdataset_clearprefetch(dns_rdataset_t *rdataset) {
-	dns_slabheader_t *header = dns_rdataset_getheader(rdataset);
+	dns_slabheader_t *header = rdataset_getheader(rdataset);
 
 	DNS_SLABHEADER_CLRATTR(header, DNS_SLABHEADERATTR_PREFETCH);
 }
 
 static void
 rdataset_getownercase(const dns_rdataset_t *rdataset, dns_name_t *name) {
-	dns_slabheader_t *header = dns_rdataset_getheader(rdataset);
+	dns_slabheader_t *header = rdataset_getheader(rdataset);
 	uint8_t mask = (1 << 7);
 	uint8_t bits = 0;
 

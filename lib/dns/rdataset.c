@@ -30,6 +30,7 @@
 #include <dns/ncache.h>
 #include <dns/rdata.h>
 #include <dns/rdataset.h>
+#include <dns/time.h>
 #include <dns/types.h>
 
 #define MAX_SHUFFLE 100
@@ -324,18 +325,12 @@ towire_answer(dns_rdataset_t *rdataset, const dns_name_t *name,
 	for (size_t i = start; i < count; i++) {
 		dns_rdata_t rdata = DNS_RDATA_INIT;
 
-		result = towire_addtypeclass(rdataset, name, cctx, target,
-					     rrbuffer, sizeof(dns_ttl_t) + 2);
-		if (result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
+		CHECK(towire_addtypeclass(rdataset, name, cctx, target,
+					  rrbuffer, sizeof(dns_ttl_t) + 2));
 		towire_addttl(rdataset, target, &rdlen);
 
 		dns_rdataset_current(rdataset, &rdata);
-		result = towire_addrdata(&rdata, cctx, target, &rdlen);
-		if (result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
+		CHECK(towire_addrdata(&rdata, cctx, target, &rdlen));
 		added++;
 
 		result = dns_rdataset_next(rdataset);
@@ -348,17 +343,11 @@ towire_answer(dns_rdataset_t *rdataset, const dns_name_t *name,
 	}
 
 	for (size_t i = 0; i < start; i++) {
-		result = towire_addtypeclass(rdataset, name, cctx, target,
-					     rrbuffer, sizeof(dns_ttl_t) + 2);
-		if (result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
+		CHECK(towire_addtypeclass(rdataset, name, cctx, target,
+					  rrbuffer, sizeof(dns_ttl_t) + 2));
 		towire_addttl(rdataset, target, &rdlen);
 
-		result = towire_addrdata(&rdatas[i], cctx, target, &rdlen);
-		if (result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
+		CHECK(towire_addrdata(&rdatas[i], cctx, target, &rdlen));
 		added++;
 	}
 
@@ -459,13 +448,9 @@ dns_rdataset_additionaldata(dns_rdataset_t *rdataset,
 	}
 
 	DNS_RDATASET_FOREACH(rdataset) {
-		isc_result_t result;
 		dns_rdata_t rdata = DNS_RDATA_INIT;
 		dns_rdataset_current(rdataset, &rdata);
-		result = dns_rdata_additionaldata(&rdata, owner_name, add, arg);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(dns_rdata_additionaldata(&rdata, owner_name, add, arg));
 	}
 
 	return ISC_R_SUCCESS;
@@ -603,13 +588,40 @@ dns_rdataset_trimttl(dns_rdataset_t *rdataset, dns_rdataset_t *sigrdataset,
 	sigrdataset->ttl = ttl;
 }
 
-dns_slabheader_t *
-dns_rdataset_getheader(const dns_rdataset_t *rdataset) {
+isc_stdtime_t
+dns_rdataset_minresign(dns_rdataset_t *rdataset) {
+	dns_rdata_t rdata = DNS_RDATA_INIT;
+	dns_rdata_rrsig_t sig;
+	int64_t when;
+	isc_result_t result;
+
 	REQUIRE(DNS_RDATASET_VALID(rdataset));
 
-	if (rdataset->methods->getheader != NULL) {
-		return (rdataset->methods->getheader)(rdataset);
+	result = dns_rdataset_first(rdataset);
+	INSIST(result == ISC_R_SUCCESS);
+	dns_rdataset_current(rdataset, &rdata);
+	(void)dns_rdata_tostruct(&rdata, &sig, NULL);
+	if ((rdata.flags & DNS_RDATA_OFFLINE) != 0) {
+		when = 0;
+	} else {
+		when = dns_time64_from32(sig.timeexpire);
 	}
+	dns_rdata_reset(&rdata);
 
-	return NULL;
+	result = dns_rdataset_next(rdataset);
+	while (result == ISC_R_SUCCESS) {
+		dns_rdataset_current(rdataset, &rdata);
+		(void)dns_rdata_tostruct(&rdata, &sig, NULL);
+		if ((rdata.flags & DNS_RDATA_OFFLINE) != 0) {
+			goto next_rr;
+		}
+		if (when == 0 || dns_time64_from32(sig.timeexpire) < when) {
+			when = dns_time64_from32(sig.timeexpire);
+		}
+	next_rr:
+		dns_rdata_reset(&rdata);
+		result = dns_rdataset_next(rdataset);
+	}
+	INSIST(result == ISC_R_NOMORE);
+	return (isc_stdtime_t)when;
 }

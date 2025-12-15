@@ -150,7 +150,7 @@ destroy_keytable(dns_keytable_t *keytable) {
 
 	dns_qpmulti_query(keytable->table, &qpr);
 	dns_qpiter_init(&qpr, &iter);
-	while (dns_qpiter_next(&iter, NULL, &pval, NULL) == ISC_R_SUCCESS) {
+	while (dns_qpiter_next(&iter, &pval, NULL) == ISC_R_SUCCESS) {
 		dns_keynode_t *n = pval;
 		dns_keynode_detach(&n);
 	}
@@ -512,7 +512,7 @@ dns_keytable_finddeepestmatch(dns_keytable_t *keytable, const dns_name_t *name,
 
 	dns_qpmulti_query(keytable->table, &qpr);
 	result = dns_qp_lookup(&qpr, name, DNS_DBNAMESPACE_NORMAL, NULL, NULL,
-			       NULL, &pval, NULL);
+			       &pval, NULL);
 	keynode = pval;
 
 	if (result == ISC_R_SUCCESS || result == DNS_R_PARTIALMATCH) {
@@ -542,7 +542,7 @@ dns_keytable_issecuredomain(dns_keytable_t *keytable, const dns_name_t *name,
 
 	dns_qpmulti_query(keytable->table, &qpr);
 	result = dns_qp_lookup(&qpr, name, DNS_DBNAMESPACE_NORMAL, NULL, NULL,
-			       NULL, &pval, NULL);
+			       &pval, NULL);
 	if (result == ISC_R_SUCCESS || result == DNS_R_PARTIALMATCH) {
 		keynode = pval;
 		if (foundname != NULL) {
@@ -557,15 +557,10 @@ dns_keytable_issecuredomain(dns_keytable_t *keytable, const dns_name_t *name,
 }
 
 static isc_result_t
-putstr(isc_buffer_t **b, const char *str) {
-	isc_result_t result;
+putstr(isc_buffer_t *b, const char *str) {
+	RETERR(isc_buffer_reserve(b, strlen(str)));
 
-	result = isc_buffer_reserve(*b, strlen(str));
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
-
-	isc_buffer_putstr(*b, str);
+	isc_buffer_putstr(b, str);
 	return ISC_R_SUCCESS;
 }
 
@@ -579,15 +574,15 @@ dns_keytable_dump(dns_keytable_t *keytable, FILE *fp) {
 
 	isc_buffer_allocate(keytable->mctx, &text, 4096);
 
-	result = dns_keytable_totext(keytable, &text);
+	result = dns_keytable_totext(keytable, text);
 
 	if (isc_buffer_usedlength(text) != 0) {
-		(void)putstr(&text, "\n");
+		(void)putstr(text, "\n");
 	} else if (result == ISC_R_SUCCESS) {
-		(void)putstr(&text, "none");
+		(void)putstr(text, "none");
 	} else {
-		(void)putstr(&text, "could not dump key table: ");
-		(void)putstr(&text, isc_result_totext(result));
+		(void)putstr(text, "could not dump key table: ");
+		(void)putstr(text, isc_result_totext(result));
 	}
 
 	fprintf(fp, "%.*s", (int)isc_buffer_usedlength(text),
@@ -598,7 +593,7 @@ dns_keytable_dump(dns_keytable_t *keytable, FILE *fp) {
 }
 
 static isc_result_t
-keynode_dslist_totext(dns_keynode_t *keynode, isc_buffer_t **text) {
+keynode_dslist_totext(dns_keynode_t *keynode, isc_buffer_t *text) {
 	isc_result_t result;
 	char namebuf[DNS_NAME_FORMATSIZE];
 	char obuf[DNS_NAME_FORMATSIZE + 200];
@@ -641,19 +636,19 @@ keynode_dslist_totext(dns_keynode_t *keynode, isc_buffer_t **text) {
 }
 
 isc_result_t
-dns_keytable_totext(dns_keytable_t *keytable, isc_buffer_t **text) {
+dns_keytable_totext(dns_keytable_t *keytable, isc_buffer_t *text) {
 	isc_result_t result = ISC_R_SUCCESS;
 	dns_qpread_t qpr;
 	dns_qpiter_t iter;
 	void *pval = NULL;
 
 	REQUIRE(VALID_KEYTABLE(keytable));
-	REQUIRE(text != NULL && *text != NULL);
+	REQUIRE(text != NULL);
 
 	dns_qpmulti_query(keytable->table, &qpr);
 	dns_qpiter_init(&qpr, &iter);
 
-	while (dns_qpiter_next(&iter, NULL, &pval, NULL) == ISC_R_SUCCESS) {
+	while (dns_qpiter_next(&iter, &pval, NULL) == ISC_R_SUCCESS) {
 		dns_keynode_t *knode = pval;
 		if (knode->dslist != NULL) {
 			result = keynode_dslist_totext(knode, text);
@@ -681,7 +676,7 @@ dns_keytable_forall(dns_keytable_t *keytable,
 	dns_qpmulti_query(keytable->table, &qpr);
 	dns_qpiter_init(&qpr, &iter);
 
-	while (dns_qpiter_next(&iter, NULL, &pval, NULL) == ISC_R_SUCCESS) {
+	while (dns_qpiter_next(&iter, &pval, NULL) == ISC_R_SUCCESS) {
 		dns_keynode_t *knode = pval;
 		(*func)(keytable, knode, &knode->name, arg);
 	}

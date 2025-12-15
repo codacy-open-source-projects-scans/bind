@@ -301,6 +301,57 @@ dns_db_endload(dns_db_t *db, dns_rdatacallbacks_t *callbacks) {
 }
 
 isc_result_t
+dns_db_beginupdate(dns_db_t *db, dns_dbversion_t *ver,
+		   dns_rdatacallbacks_t *callbacks) {
+	/*
+	 * Begin updating 'db'.
+	 */
+
+	REQUIRE(DNS_DB_VALID(db));
+	REQUIRE(dns_db_iszone(db));
+	REQUIRE(DNS_CALLBACK_VALID(callbacks));
+
+	if (db->methods->beginupdate != NULL) {
+		return (db->methods->beginupdate)(db, ver, callbacks);
+	}
+	return ISC_R_NOTIMPLEMENTED;
+}
+
+isc_result_t
+dns_db_commitupdate(dns_db_t *db, dns_rdatacallbacks_t *callbacks) {
+	/*
+	 * Commit the update to 'db'.
+	 */
+
+	REQUIRE(DNS_DB_VALID(db));
+	REQUIRE(dns_db_iszone(db));
+	REQUIRE(DNS_CALLBACK_VALID(callbacks));
+
+	if (db->methods->commitupdate != NULL) {
+		return (db->methods->commitupdate)(db, callbacks);
+	}
+
+	return ISC_R_NOTIMPLEMENTED;
+}
+
+isc_result_t
+dns_db_abortupdate(dns_db_t *db, dns_rdatacallbacks_t *callbacks) {
+	/*
+	 * Abort the update to 'db'.
+	 */
+
+	REQUIRE(DNS_DB_VALID(db));
+	REQUIRE(dns_db_iszone(db));
+	REQUIRE(DNS_CALLBACK_VALID(callbacks));
+
+	if (db->methods->abortupdate != NULL) {
+		return (db->methods->abortupdate)(db, callbacks);
+	}
+
+	return ISC_R_NOTIMPLEMENTED;
+}
+
+isc_result_t
 dns_db_load(dns_db_t *db, const char *filename, dns_masterformat_t format,
 	    unsigned int options) {
 	isc_result_t result, eresult;
@@ -317,10 +368,7 @@ dns_db_load(dns_db_t *db, const char *filename, dns_masterformat_t format,
 	}
 
 	dns_rdatacallbacks_init(&callbacks);
-	result = dns_db_beginload(db, &callbacks);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(dns_db_beginload(db, &callbacks));
 	result = dns_master_loadfile(filename, &db->origin, &db->origin,
 				     db->rdclass, options, 0, &callbacks, NULL,
 				     NULL, db->mctx, format, 0);
@@ -697,10 +745,7 @@ dns_db_getsoaserial(dns_db_t *db, dns_dbversion_t *ver, uint32_t *serialp) {
 
 	REQUIRE(dns_db_iszone(db) || dns_db_isstub(db));
 
-	result = dns_db_findnode(db, dns_db_origin(db), false, &node);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(dns_db_findnode(db, dns_db_origin(db), false, &node));
 
 	dns_rdataset_init(&rdataset);
 	result = dns_db_findrdataset(db, node, ver, dns_rdatatype_soa, 0,

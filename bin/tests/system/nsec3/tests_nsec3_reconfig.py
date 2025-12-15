@@ -94,6 +94,18 @@ def after_servers_start(ns3, templates):
     [
         pytest.param(
             {
+                "zone": "rsasha1-to-nsec3.kasp",
+                "policy": "nsec3",
+                "key-properties": [
+                    f"csk 0 {RSASHA1.number} 2048 goal:hidden dnskey:omnipresent krrsig:omnipresent zrrsig:omnipresent ds:omnipresent",
+                    f"csk 0 {ALGORITHM} {SIZE} goal:omnipresent dnskey:rumoured krrsig:rumoured zrrsig:rumoured ds:hidden",
+                ],
+            },
+            id="rsasha1-to-nsec3.kasp",
+            marks=isctest.mark.with_algorithm("RSASHA1"),
+        ),
+        pytest.param(
+            {
                 "zone": "rsasha1-to-nsec3-wait.kasp",
                 "policy": "nsec3",
                 "key-properties": [
@@ -109,7 +121,7 @@ def after_servers_start(ns3, templates):
                 "zone": "nsec3-to-rsasha1.kasp",
                 "policy": "rsasha1",
                 "key-properties": [
-                    f"csk 0 {ALGORITHM} {SIZE} goal:hidden dnskey:unretentive krrsig:unretentive zrrsig:unretentive ds:hidden",
+                    f"csk 0 {ALGORITHM} {SIZE} goal:hidden dnskey:omnipresent krrsig:omnipresent zrrsig:omnipresent ds:omnipresent",
                     f"csk 0 {RSASHA1.number} 2048 goal:omnipresent dnskey:rumoured krrsig:rumoured zrrsig:rumoured ds:hidden",
                 ],
             },
@@ -162,18 +174,6 @@ def test_nsec_case(ns3, params):
                 ],
             },
             id="nsec-to-nsec3.kasp",
-        ),
-        pytest.param(
-            {
-                "zone": "rsasha1-to-nsec3.kasp",
-                "policy": "nsec3",
-                "key-properties": [
-                    f"csk 0 {RSASHA1.number} 2048 goal:hidden dnskey:unretentive krrsig:unretentive zrrsig:unretentive ds:hidden",
-                    f"csk 0 {ALGORITHM} {SIZE} goal:omnipresent dnskey:rumoured krrsig:rumoured zrrsig:rumoured ds:hidden",
-                ],
-            },
-            id="rsasha1-to-nsec3.kasp",
-            marks=isctest.mark.with_algorithm("RSASHA1"),
         ),
         pytest.param(
             {
@@ -326,9 +326,13 @@ def test_nsec3_ent(ns3, templates):
     # remove a name, bump the SOA, and reload
     templates.render(f"{ns3.identifier}/nsec3-ent.kasp.db", {"serial": 2})
 
+    messages = [
+        f"zone {zone}/IN (unsigned): loaded serial 2",
+        f"zone_needdump: zone {zone}/IN (signed): enter",
+    ]
     with ns3.watch_log_from_here() as watcher:
         ns3.rndc(f"reload {zone}")
-        watcher.wait_for_line(f"zone {zone}/IN (signed): sending notifies")
+        watcher.wait_for_sequence(messages)
 
     # try the query again
     query = isctest.query.create(f"c.{fqdn}", dns.rdatatype.A)
@@ -345,9 +349,13 @@ def test_nsec3_ent(ns3, templates):
     # add a name with an ENT, bump the SOA, and reload ensuring the time stamp changes
     templates.render(f"{ns3.identifier}/nsec3-ent.kasp.db", {"serial": 3})
 
+    messages = [
+        f"zone {zone}/IN (unsigned): loaded serial 3",
+        f"zone_needdump: zone {zone}/IN (signed): enter",
+    ]
     with ns3.watch_log_from_here() as watcher:
         ns3.rndc(f"reload {zone}")
-        watcher.wait_for_line(f"zone {zone}/IN (signed): sending notifies")
+        watcher.wait_for_sequence(messages)
 
     # try the query again
     query = isctest.query.create(f"x.y.z.{fqdn}", dns.rdatatype.A)

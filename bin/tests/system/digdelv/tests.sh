@@ -69,9 +69,7 @@ KEYDATA="$(sed <ns2/keydata -e 's/+/[+]/g')"
 NOSPLIT="$(sed <ns2/keydata -e 's/+/[+]/g' -e 's/ //g')"
 
 HAS_PYYAML=0
-if [ -x "$PYTHON" ]; then
-  $PYTHON -c "import yaml" 2>/dev/null && HAS_PYYAML=1
-fi
+$PYTHON -c "import yaml" 2>/dev/null && HAS_PYYAML=1
 
 #
 # test whether ans7/ans.pl will be able to send a UPDATE response.
@@ -1428,6 +1426,14 @@ if [ -x "$DIG" ]; then
   grep "; EDNS: version: 0, flags:; udp: 1232" dig.out.test$n >/dev/null || ret=1
   grep -F "status: BADVERS" dig.out.test$n >/dev/null || ret=1
   grep -F "status: NOERROR" dig.out.test$n >/dev/null || ret=1
+  if [ $ret -ne 0 ]; then echo_i "failed"; fi
+  status=$((status + ret))
+
+  n=$((n + 1))
+  echo_i "check that dig +showtruncated works ($n)"
+  dig_with_opts @10.53.0.2 +qr +showtruncated truncated.example TXT >dig.out.test$n 2>&1 || ret=1
+  grep 'flags:[^;]* tc[ ;].*ANSWER: 0' dig.out.test$n >/dev/null || ret=1
+  grep 'ANSWER: 100,' dig.out.test$n >/dev/null || ret=1
   if [ $ret -ne 0 ]; then echo_i "failed"; fi
   status=$((status + ret))
 

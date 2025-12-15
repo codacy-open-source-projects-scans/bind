@@ -15,17 +15,24 @@ import glob
 import os
 from pathlib import Path
 import re
-import subprocess
+from re import compile as Re
 import time
 from typing import Dict, List, Optional, Tuple, Union
 
 import dns
+import dns.dnssec
+import dns.rdatatype
+import dns.rrset
 import dns.tsig
+
+import pytest
 
 import isctest.log
 import isctest.query
 import isctest.util
+from isctest.compat import DSDigest
 from isctest.instance import NamedInstance
+from isctest.template import TrustAnchor
 from isctest.vars.algorithms import Algorithm, ALL_ALGORITHMS_BY_NUM
 
 DEFAULT_TTL = 300
@@ -443,18 +450,48 @@ class Key:
                 return int(line.split()[1])
         return 0
 
-    def dnskey(self):
+    @property
+    def dnskey(self) -> dns.rrset.RRset:
+        pytest.importorskip("dns", minversion="2.2.0")  # dns.zonefile.read_rrsets
         with open(self.keyfile, "r", encoding="utf-8") as file:
-            for line in file:
-                if "DNSKEY" in line:
-                    return line.strip()
-        return "undefined"
+            rrsets = dns.zonefile.read_rrsets(
+                file.read(),
+                rdclass=None,  # read rdclass from the file
+                default_ttl=DEFAULT_TTL,  # use this TTL if not present
+            )
+        assert len(rrsets) == 1, f"{self.keyfile} has multiple RRsets"
+        dnskey_rr = rrsets[0]
+        assert len(dnskey_rr) == 1, f"{self.keyfile} has multiple RRs"
+        assert (
+            dnskey_rr.rdtype == dns.rdatatype.DNSKEY
+        ), f"DNSKEY not found in {self.keyfile}"
+        return dnskey_rr
+
+    def into_ta(self, ta_type: str, dsdigest=DSDigest.SHA256) -> TrustAnchor:
+        dnskey = self.dnskey
+        if ta_type in ["static-ds", "initial-ds"]:
+            ds = dns.dnssec.make_ds(dnskey.name, dnskey[0], dsdigest)
+            parts = str(ds).split()
+            contents = " ".join(parts[:3]) + f' "{parts[3]}"'
+        elif ta_type in ["static-key", "initial-key"]:
+            parts = str(dnskey).split()
+            contents = " ".join(parts[4:7]) + f' "{"".join(parts[7:])}"'
+        else:
+            raise ValueError(f"invalid trust anchor type: {ta_type}")
+        return TrustAnchor(str(dnskey.name), ta_type, contents)
 
     def is_ksk(self) -> bool:
         return self.get_metadata("KSK") == "yes"
 
     def is_zsk(self) -> bool:
         return self.get_metadata("ZSK") == "yes"
+
+    def role(self) -> str:
+        if self.is_ksk() and self.is_zsk():
+            return "CSK"
+        if self.is_ksk():
+            return "KSK"
+        return "ZSK"
 
     @property
     def algorithm(self) -> Algorithm:
@@ -496,8 +533,8 @@ class Key:
             str(self.keyfile),
         ]
 
-        out = isctest.run.cmd(dsfromkey_command)
-        dsfromkey = out.stdout.decode("utf-8").split()
+        cmd = isctest.run.cmd(dsfromkey_command)
+        dsfromkey = cmd.out.split()
 
         rdata_fromfile = " ".join(dsfromkey[:7])
         rdata_fromwire = " ".join(cds[:7])
@@ -800,39 +837,41 @@ def check_dnssec_verify(server, zone, tsig=None):
                     file.write(rr.to_text())
                     file.write("\n")
 
-            try:
-                verify_command = [os.environ.get("VERIFY"), "-z", "-o", zone, zonefile]
-                verified = isctest.run.cmd(verify_command)
-            except subprocess.CalledProcessError:
-                pass
-
-        if verified:
-            break
+            verify_command = [os.environ.get("VERIFY"), "-z", "-o", zone, zonefile]
+            verified = isctest.run.cmd(verify_command, raise_on_exception=False)
+            if verified.rc == 0:
+                return
 
         time.sleep(1)
 
-    assert verified
+    assert False, "zone not verified"
 
 
-def check_dnssecstatus(server, zone, keys, policy=None, view=None):
+def check_dnssecstatus(server, zone, keys, policy=None, view=None, verbose=False):
     # Call rndc dnssec -status on 'server' for 'zone'. Expect 'policy' in
     # the output. This is a loose verification, it just tests if the right
     # policy name is returned, and if all expected keys are listed.
     response = ""
+
+    # Verbose output.
+    v = ""
+    if verbose:
+        v = "-v "
+
     if view is None:
-        response = server.rndc(f"dnssec -status {zone}", log=False)
+        response = server.rndc(f"dnssec -status {v}{zone}")
     else:
-        response = server.rndc(f"dnssec -status {zone} in {view}", log=False)
+        response = server.rndc(f"dnssec -status {v}{zone} in {view}")
 
     if policy is None:
-        assert "Zone does not have dnssec-policy" in response
+        assert "Zone does not have dnssec-policy" in response.out
         return
 
-    assert f"dnssec-policy: {policy}" in response
+    assert f"DNSSEC status for zone '{zone}' using policy '{policy}'" in response.out
 
     for key in keys:
         if not key.external:
-            assert f"key: {key.tag}" in response
+            assert f"{key.role()} {key.tag}" in response.out
 
 
 def _check_signatures(
@@ -1060,9 +1099,8 @@ def check_cdslog(server, zone, key, substr):
 
 
 def check_cdslog_prohibit(server, zone, key, substr):
-    server.log.prohibit(
-        f"{substr} for key {zone}/{key.algorithm.name}/{key.tag} is now published"
-    )
+    msg = f"{substr} for key {zone}/{key.algorithm.name}/{key.tag} is now published"
+    assert msg not in server.log
 
 
 def check_cdsdelete(rrset, expected):
@@ -1220,6 +1258,7 @@ def check_rollover_step(server, config, policy, step):
     check_keytimes_flag = step.get("check-keytimes", True)
     zone_signed = step.get("zone-signed", True)
     manual_mode = step.get("manual-mode", False)
+    verbose = step.get("verbose", False)
 
     isctest.log.info(f"check rollover step {zone}")
 
@@ -1281,7 +1320,7 @@ def check_rollover_step(server, config, policy, step):
     if check_keytimes_flag:
         check_keytimes(keys, expected)
 
-    check_dnssecstatus(server, zone, keys, policy=policy)
+    check_dnssecstatus(server, zone, keys, policy=policy, verbose=verbose)
     check_apex(
         server,
         zone,
@@ -1436,7 +1475,7 @@ def next_key_event_equals(server, zone, next_event):
         waitfor = rf".*zone {zone}.*: next key event in (?!3600$)(.*) seconds"
 
     with server.watch_log_from_start() as watcher:
-        watcher.wait_for_line(re.compile(waitfor))
+        watcher.wait_for_line(Re(waitfor))
 
     # WMM: The with code below is extracting the line the watcher was
     # waiting for. If WatchLog.wait_for_line()` returned the matched string,

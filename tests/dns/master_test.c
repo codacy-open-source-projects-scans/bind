@@ -65,13 +65,14 @@ static void
 rawdata_callback(dns_zone_t *zone, dns_masterrawheader_t *header);
 
 static isc_result_t
-add_callback(void *arg, const dns_name_t *owner,
-	     dns_rdataset_t *dataset DNS__DB_FLARG) {
+add_callback(void *arg, const dns_name_t *owner, dns_rdataset_t *dataset,
+	     dns_diffop_t op DNS__DB_FLARG) {
 	char buf[BIGBUFLEN];
 	isc_buffer_t target;
 	isc_result_t result;
 
 	UNUSED(arg);
+	UNUSED(op);
 
 	isc_buffer_init(&target, buf, BIGBUFLEN);
 	result = dns_rdataset_totext(dataset, owner, false, false, &target);
@@ -88,7 +89,6 @@ rawdata_callback(dns_zone_t *zone, dns_masterrawheader_t *h) {
 static isc_result_t
 setup_master(void (*warn)(struct dns_rdatacallbacks *, const char *, ...),
 	     void (*error)(struct dns_rdatacallbacks *, const char *, ...)) {
-	isc_result_t result;
 	int len;
 	isc_buffer_t source;
 
@@ -100,13 +100,10 @@ setup_master(void (*warn)(struct dns_rdatacallbacks *, const char *, ...),
 	isc_buffer_setactive(&source, len);
 	dns_master_initrawheader(&header);
 
-	result = dns_name_fromtext(dns_origin, &source, dns_rootname, 0);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(dns_name_fromtext(dns_origin, &source, dns_rootname, 0));
 
 	dns_rdatacallbacks_init_stdio(&callbacks);
-	callbacks.add = add_callback;
+	callbacks.update = add_callback;
 	callbacks.rawdata = rawdata_callback;
 	callbacks.zone = NULL;
 	if (warn != NULL) {
@@ -116,7 +113,7 @@ setup_master(void (*warn)(struct dns_rdatacallbacks *, const char *, ...),
 		callbacks.error = error;
 	}
 	headerset = false;
-	return result;
+	return ISC_R_SUCCESS;
 }
 
 static isc_result_t
@@ -126,13 +123,10 @@ test_master(const char *workdir, const char *testfile,
 	    void (*error)(struct dns_rdatacallbacks *, const char *, ...)) {
 	isc_result_t result;
 
-	result = setup_master(warn, error);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(setup_master(warn, error));
 
 	dns_rdatacallbacks_init_stdio(&callbacks);
-	callbacks.add = add_callback;
+	callbacks.update = add_callback;
 	callbacks.rawdata = rawdata_callback;
 	callbacks.zone = NULL;
 	if (warn != NULL) {
@@ -143,10 +137,7 @@ test_master(const char *workdir, const char *testfile,
 	}
 
 	if (workdir != NULL) {
-		result = isc_dir_chdir(workdir);
-		if (result != ISC_R_SUCCESS) {
-			return result;
-		}
+		RETERR(isc_dir_chdir(workdir));
 	}
 
 	result = dns_master_loadfile(testfile, dns_origin, dns_origin,

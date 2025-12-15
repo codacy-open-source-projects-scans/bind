@@ -46,14 +46,6 @@
 #include <ns/query.h>
 #include <ns/types.h>
 
-#define CHECK(op)                              \
-	do {                                   \
-		result = (op);                 \
-		if (result != ISC_R_SUCCESS) { \
-			goto cleanup;          \
-		}                              \
-	} while (0)
-
 /*
  * Possible values for the settings of filter-a-on-v6 and
  * filter-a-on-v4: "no" is NONE, "yes" is FILTER, "break-dnssec"
@@ -192,9 +184,9 @@ static cfg_type_t cfg_type_filter_a = {
 };
 
 static cfg_clausedef_t param_clauses[] = {
-	{ "filter-a", &cfg_type_bracketed_aml, 0 },
-	{ "filter-a-on-v6", &cfg_type_filter_a, 0 },
-	{ "filter-a-on-v4", &cfg_type_filter_a, 0 },
+	{ "filter-a", &cfg_type_bracketed_aml, 0, NULL },
+	{ "filter-a-on-v6", &cfg_type_filter_a, 0, NULL },
+	{ "filter-a-on-v4", &cfg_type_filter_a, 0, NULL },
 };
 
 static cfg_clausedef_t *param_clausesets[] = { param_clauses, NULL };
@@ -280,8 +272,8 @@ parse_parameters(filter_instance_t *inst, const char *parameters,
 
 	isc_buffer_constinit(&b, parameters, strlen(parameters));
 	isc_buffer_add(&b, strlen(parameters));
-	CHECK(cfg_parse_buffer(mctx, &b, cfg_file, cfg_line,
-			       &cfg_type_parameters, 0, &param_obj));
+	CHECK(cfg_parse_buffer(&b, cfg_file, cfg_line, &cfg_type_parameters, 0,
+			       &param_obj));
 
 	CHECK(parse_filter_a_on(param_obj, "filter-a-on-v6", &inst->v6_a));
 	CHECK(parse_filter_a_on(param_obj, "filter-a-on-v4", &inst->v4_a));
@@ -367,8 +359,8 @@ plugin_check(const char *parameters, const void *cfg, const char *cfg_file,
 
 	isc_buffer_constinit(&b, parameters, strlen(parameters));
 	isc_buffer_add(&b, strlen(parameters));
-	CHECK(cfg_parse_buffer(mctx, &b, cfg_file, cfg_line,
-			       &cfg_type_parameters, 0, &param_obj));
+	CHECK(cfg_parse_buffer(&b, cfg_file, cfg_line, &cfg_type_parameters, 0,
+			       &param_obj));
 
 	CHECK(check_syntax(param_obj, cfg, mctx, aclctx));
 

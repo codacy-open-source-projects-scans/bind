@@ -84,6 +84,9 @@ keydirexist(const cfg_obj_t *zcgf, const char *optname, dns_name_t *zname,
 static const cfg_obj_t *
 find_maplist(const cfg_obj_t *config, const char *listname, const char *name);
 
+static isc_result_t
+validate_remotes(const cfg_obj_t *obj, const cfg_obj_t *config,
+		 uint32_t *countp, isc_mem_t *mctx);
 static void
 freekey(char *key, unsigned int type, isc_symvalue_t value, void *userarg) {
 	UNUSED(type);
@@ -312,16 +315,12 @@ check_forward(const cfg_obj_t *config, const cfg_obj_t *options,
 		return ISC_R_FAILURE;
 	}
 	if (forwarders != NULL) {
-		isc_result_t result = ISC_R_SUCCESS;
 		const cfg_obj_t *tlspobj = cfg_tuple_get(forwarders, "tls");
 
 		if (tlspobj != NULL && cfg_obj_isstring(tlspobj)) {
 			const char *tls = cfg_obj_asstring(tlspobj);
 			if (tls != NULL) {
-				result = validate_tls(config, tlspobj, tls);
-				if (result != ISC_R_SUCCESS) {
-					return result;
-				}
+				RETERR(validate_tls(config, tlspobj, tls));
 			}
 		}
 
@@ -330,10 +329,7 @@ check_forward(const cfg_obj_t *config, const cfg_obj_t *options,
 			const cfg_obj_t *forwarder = cfg_listelt_value(element);
 			const char *tls = cfg_obj_getsockaddrtls(forwarder);
 			if (tls != NULL) {
-				result = validate_tls(config, faddresses, tls);
-				if (result != ISC_R_SUCCESS) {
-					return result;
-				}
+				RETERR(validate_tls(config, faddresses, tls));
 			}
 		}
 	}
@@ -2084,6 +2080,12 @@ check_remoteserverlist(const cfg_obj_t *cctx, const char *list,
 			result = tresult;
 			break;
 		}
+
+		uint32_t dummy = 0;
+		result = validate_remotes(obj, cctx, &dummy, mctx);
+		if (result != ISC_R_SUCCESS) {
+			break;
+		}
 	}
 	return result;
 }
@@ -2371,13 +2373,9 @@ check_tls_definitions(const cfg_obj_t *config, isc_mem_t *mctx) {
 static isc_result_t
 get_remotes(const cfg_obj_t *cctx, const char *list, const char *name,
 	    const cfg_obj_t **ret) {
-	isc_result_t result = ISC_R_SUCCESS;
 	const cfg_obj_t *obj = NULL;
 
-	result = cfg_map_get(cctx, list, &obj);
-	if (result != ISC_R_SUCCESS) {
-		return result;
-	}
+	RETERR(cfg_map_get(cctx, list, &obj));
 
 	CFG_LIST_FOREACH(obj, elt) {
 		const char *listname = NULL;
@@ -2415,6 +2413,96 @@ get_remoteservers_def(const char *name, const cfg_obj_t *cctx,
 }
 
 static isc_result_t
+validate_remotes_key(const cfg_obj_t *config, const cfg_obj_t *key) {
+	isc_result_t result = ISC_R_SUCCESS;
+
+	if (cfg_obj_isstring(key)) {
+		const cfg_obj_t *keys = NULL;
+		const char *str = cfg_obj_asstring(key);
+		dns_fixedname_t fname;
+		dns_name_t *nm = dns_fixedname_initname(&fname);
+		bool found = false;
+
+		result = dns_name_fromstring(nm, str, dns_rootname, 0, NULL);
+		if (result != ISC_R_SUCCESS) {
+			cfg_obj_log(key, ISC_LOG_ERROR,
+				    "'%s' is not a valid name", str);
+		}
+
+		result = cfg_map_get(config, "key", &keys);
+		CFG_LIST_FOREACH(keys, elt) {
+			/*
+			 * `key` are normalized TSIG which must be identified by
+			 * a domain name, so this is needed. Otherwise, with a
+			 * raw string comparison we could have:
+			 *
+			 * remote-servers { x.y.z.s key foo };
+			 * key foo. {
+			 *  ...
+			 * };
+			 *
+			 * This would otherwise fail, even though the key
+			 * exists.
+			 */
+			const cfg_obj_t *foundkey = cfg_listelt_value(elt);
+			const char *foundkeystr =
+				cfg_obj_asstring(cfg_map_getname(foundkey));
+			dns_fixedname_t foundfname;
+			dns_name_t *foundkeyname =
+				dns_fixedname_initname(&foundfname);
+
+			result = dns_name_fromstring(foundkeyname, foundkeystr,
+						     dns_rootname, 0, NULL);
+
+			if (dns_name_equal(nm, foundkeyname)) {
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			cfg_obj_log(key, ISC_LOG_ERROR,
+				    "key '%s' is not defined",
+				    cfg_obj_asstring(key));
+			result = ISC_R_FAILURE;
+		}
+	}
+
+	return result;
+}
+
+static isc_result_t
+validate_remotes_tls(const cfg_obj_t *config, const cfg_obj_t *tls) {
+	isc_result_t result = ISC_R_SUCCESS;
+
+	if (cfg_obj_isstring(tls)) {
+		const char *str = cfg_obj_asstring(tls);
+		dns_fixedname_t fname;
+		dns_name_t *nm = dns_fixedname_initname(&fname);
+
+		result = dns_name_fromstring(nm, str, dns_rootname, 0, NULL);
+		if (result != ISC_R_SUCCESS) {
+			cfg_obj_log(tls, ISC_LOG_ERROR,
+				    "'%s' is not a valid name", str);
+		}
+
+		if (strcasecmp(str, "ephemeral") != 0) {
+			const cfg_obj_t *tlsmap = NULL;
+
+			tlsmap = find_maplist(config, "tls", str);
+			if (tlsmap == NULL) {
+				cfg_obj_log(tls, ISC_LOG_ERROR,
+					    "tls '%s' is not defined",
+					    cfg_obj_asstring(tls));
+				result = ISC_R_FAILURE;
+			}
+		}
+	}
+
+	return result;
+}
+
+static isc_result_t
 validate_remotes(const cfg_obj_t *obj, const cfg_obj_t *config,
 		 uint32_t *countp, isc_mem_t *mctx) {
 	isc_result_t result = ISC_R_SUCCESS;
@@ -2445,68 +2533,20 @@ resume:
 		key = cfg_tuple_get(cfg_listelt_value(element), "key");
 		tls = cfg_tuple_get(cfg_listelt_value(element), "tls");
 
+		result = validate_remotes_key(config, key);
+		if (result != ISC_R_SUCCESS) {
+			goto out;
+		}
+
+		result = validate_remotes_tls(config, tls);
+		if (result != ISC_R_SUCCESS) {
+			goto out;
+		}
+
 		if (cfg_obj_issockaddr(addr)) {
 			count++;
-			if (cfg_obj_isstring(key)) {
-				const char *str = cfg_obj_asstring(key);
-				dns_fixedname_t fname;
-				dns_name_t *nm = dns_fixedname_initname(&fname);
-				tresult = dns_name_fromstring(
-					nm, str, dns_rootname, 0, NULL);
-				if (tresult != ISC_R_SUCCESS) {
-					cfg_obj_log(key, ISC_LOG_ERROR,
-						    "'%s' is not a valid name",
-						    str);
-					if (result == ISC_R_SUCCESS) {
-						result = tresult;
-					}
-				}
-			}
-			if (cfg_obj_isstring(tls)) {
-				const char *str = cfg_obj_asstring(tls);
-				dns_fixedname_t fname;
-				dns_name_t *nm = dns_fixedname_initname(&fname);
-				tresult = dns_name_fromstring(
-					nm, str, dns_rootname, 0, NULL);
-				if (tresult != ISC_R_SUCCESS) {
-					cfg_obj_log(tls, ISC_LOG_ERROR,
-						    "'%s' is not a valid name",
-						    str);
-					if (result == ISC_R_SUCCESS) {
-						result = tresult;
-					}
-				}
 
-				if (strcasecmp(str, "ephemeral") != 0) {
-					const cfg_obj_t *tlsmap = NULL;
-
-					tlsmap = find_maplist(config, "tls",
-							      str);
-					if (tlsmap == NULL) {
-						cfg_obj_log(
-							tls, ISC_LOG_ERROR,
-							"tls '%s' is not "
-							"defined",
-							cfg_obj_asstring(tls));
-						result = ISC_R_FAILURE;
-					}
-				}
-			}
 			continue;
-		}
-		if (!cfg_obj_isvoid(key)) {
-			cfg_obj_log(key, ISC_LOG_ERROR, "unexpected token '%s'",
-				    cfg_obj_asstring(key));
-			if (result == ISC_R_SUCCESS) {
-				result = ISC_R_FAILURE;
-			}
-		}
-		if (!cfg_obj_isvoid(tls)) {
-			cfg_obj_log(key, ISC_LOG_ERROR, "unexpected token '%s'",
-				    cfg_obj_asstring(tls));
-			if (result == ISC_R_SUCCESS) {
-				result = ISC_R_FAILURE;
-			}
 		}
 		listname = cfg_obj_asstring(addr);
 		symvalue.as_cpointer = addr;
@@ -2539,11 +2579,14 @@ resume:
 		element = stack[--pushed];
 		goto resume;
 	}
+
+	*countp = count;
+
+out:
 	if (stack != NULL) {
 		isc_mem_cput(mctx, stack, stackcount, sizeof(*stack));
 	}
 	isc_symtab_destroy(&symtab);
-	*countp = count;
 	return result;
 }
 
@@ -2838,10 +2881,7 @@ check_recursion(const cfg_obj_t *config, const cfg_obj_t *voptions,
 		result = cfg_map_get(goptions, "allow-recursion", &obj);
 	}
 	if (result == ISC_R_SUCCESS) {
-		result = cfg_acl_fromconfig(obj, config, aclctx, mctx, 0, &acl);
-		if (result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
+		CHECK(cfg_acl_fromconfig(obj, config, aclctx, mctx, 0, &acl));
 		retval = !dns_acl_isnone(acl);
 	}
 
@@ -4439,10 +4479,7 @@ check_keylist(const cfg_obj_t *keys, isc_symtab_t *symtab, isc_mem_t *mctx) {
 			result = tresult;
 			continue;
 		}
-		tresult = isccfg_check_key(key);
-		if (tresult != ISC_R_SUCCESS) {
-			return tresult;
-		}
+		RETERR(isccfg_check_key(key));
 
 		dns_name_format(name, namebuf, sizeof(namebuf));
 		keyname = isc_mem_strdup(mctx, namebuf);
@@ -4859,12 +4896,12 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 			    "key '%s': "
 			    "invalid initialization method '%s'",
 			    namestr, atstr);
-		result = ISC_R_FAILURE;
 		/*
 		 * We can't interpret the trust anchor, so
 		 * we skip all other checks.
 		 */
-		goto cleanup;
+		CLEANUP(ISC_R_FAILURE);
+		UNREACHABLE();
 	}
 
 	switch (anchortype) {
@@ -5021,6 +5058,10 @@ record_static_keys(isc_symtab_t *symtab, isc_mem_t *mctx,
 
 		result = dns_name_fromstring(name, str, dns_rootname, 0, NULL);
 		if (result != ISC_R_SUCCESS) {
+			/*
+			 * No need to record an error or to log it as has
+			 * has already been handled by check_trust_anchor.
+			 */
 			continue;
 		}
 
@@ -5043,11 +5084,10 @@ record_static_keys(isc_symtab_t *symtab, isc_mem_t *mctx,
 		result = isc_symtab_define(symtab, p, 1, symvalue,
 					   isc_symexists_reject);
 		if (result == ISC_R_EXISTS) {
+			/*
+			 * Multiple trust anchors for the same name are ok.
+			 */
 			isc_mem_free(mctx, p);
-		} else if (result != ISC_R_SUCCESS) {
-			isc_mem_free(mctx, p);
-			ret = result;
-			continue;
 		}
 
 		if (autovalidation && dns_name_equal(name, dns_rootname)) {
@@ -5090,6 +5130,10 @@ check_initializing_keys(isc_symtab_t *symtab, const cfg_obj_t *keylist) {
 		str = cfg_obj_asstring(cfg_tuple_get(obj, "name"));
 		result = dns_name_fromstring(name, str, dns_rootname, 0, NULL);
 		if (result != ISC_R_SUCCESS) {
+			/*
+			 * No need to record an error or to log it as has
+			 * has already been handled by check_trust_anchor.
+			 */
 			continue;
 		}
 
@@ -5116,10 +5160,10 @@ check_initializing_keys(isc_symtab_t *symtab, const cfg_obj_t *keylist) {
 	return ret;
 }
 
-static isc_result_t
+static void
 record_ds_keys(isc_symtab_t *symtab, isc_mem_t *mctx,
 	       const cfg_obj_t *keylist) {
-	isc_result_t result, ret = ISC_R_SUCCESS;
+	isc_result_t result;
 	dns_fixedname_t fixed;
 	dns_name_t *name = NULL;
 	char namebuf[DNS_NAME_FORMATSIZE], *p = NULL;
@@ -5135,6 +5179,10 @@ record_ds_keys(isc_symtab_t *symtab, isc_mem_t *mctx,
 
 		result = dns_name_fromstring(name, str, dns_rootname, 0, NULL);
 		if (result != ISC_R_SUCCESS) {
+			/*
+			 * No need to record an error or to log it as has
+			 * has already been handled by check_trust_anchor.
+			 */
 			continue;
 		}
 
@@ -5155,11 +5203,12 @@ record_ds_keys(isc_symtab_t *symtab, isc_mem_t *mctx,
 		result = isc_symtab_define(symtab, p, 1, symvalue,
 					   isc_symexists_reject);
 		if (result == ISC_R_EXISTS) {
+			/*
+			 * Multiple trust anchors for the same name are ok.
+			 */
 			isc_mem_free(mctx, p);
 		}
 	}
-
-	return ret;
 }
 
 /*
@@ -5187,10 +5236,7 @@ check_ta_conflicts(const cfg_obj_t *global_ta, const cfg_obj_t *view_ta,
 			result = tresult;
 		}
 
-		tresult = record_ds_keys(dstab, mctx, keylist);
-		if (result == ISC_R_SUCCESS) {
-			result = tresult;
-		}
+		record_ds_keys(dstab, mctx, keylist);
 	}
 
 	CFG_LIST_FOREACH(view_ta, elt) {
@@ -5201,10 +5247,7 @@ check_ta_conflicts(const cfg_obj_t *global_ta, const cfg_obj_t *view_ta,
 			result = tresult;
 		}
 
-		tresult = record_ds_keys(dstab, mctx, keylist);
-		if (result == ISC_R_SUCCESS) {
-			result = tresult;
-		}
+		record_ds_keys(dstab, mctx, keylist);
 	}
 
 	/*
