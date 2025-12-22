@@ -1845,7 +1845,8 @@ dns64_reverse(dns_view_t *view, isc_mem_t *mctx, isc_netaddr_t *na,
 		dns_zone_setqueryonacl(zone, view->queryonacl);
 	}
 	dns_zone_setcheckdstype(zone, dns_checkdstype_no);
-	dns_zone_setnotifytype(zone, dns_notifytype_no);
+	dns_zone_setnotifytype(zone, dns_rdatatype_soa, dns_notifytype_no);
+	dns_zone_setnotifytype(zone, dns_rdatatype_cds, dns_notifytype_no);
 	dns_zone_setoption(zone, DNS_ZONEOPT_NOCHECKNS, true);
 	setquerystats(zone, mctx, dns_zonestat_none);
 	CHECK(dns_view_addzone(view, zone));
@@ -2716,6 +2717,15 @@ configure_catz_zone(dns_view_t *view, dns_view_t *pview,
 	}
 
 	result = dns_catz_zone_add(view->catzs, &origin, &zone);
+	if (result != ISC_R_SUCCESS && result != ISC_R_EXISTS) {
+		cfg_obj_log(catz_obj, DNS_CATZ_ERROR_LEVEL,
+			    "catz: dns_catz_zone_add failed: %s",
+			    isc_result_totext(result));
+		goto cleanup;
+	}
+
+	dns_catz_zone_prereconfig(zone);
+
 	if (result == ISC_R_EXISTS) {
 		catz_reconfig_data_t data = {
 			.catz = zone,
@@ -2734,11 +2744,6 @@ configure_catz_zone(dns_view_t *view, dns_view_t *pview,
 					      &data);
 
 		result = ISC_R_SUCCESS;
-	} else if (result != ISC_R_SUCCESS) {
-		cfg_obj_log(catz_obj, DNS_CATZ_ERROR_LEVEL,
-			    "catz: dns_catz_zone_add failed: %s",
-			    isc_result_totext(result));
-		goto cleanup;
 	}
 
 	dns_catz_zone_resetdefoptions(zone);
@@ -2775,6 +2780,8 @@ configure_catz_zone(dns_view_t *view, dns_view_t *pview,
 	if (obj != NULL && cfg_obj_isduration(obj)) {
 		opts->min_update_interval = cfg_obj_asduration(obj);
 	}
+
+	dns_catz_zone_postreconfig(zone);
 
 cleanup:
 	dns_name_free(&origin, view->mctx);
@@ -3214,7 +3221,8 @@ create_empty_zone(dns_zone_t *pzone, dns_name_t *name, dns_view_t *view,
 	dns_zone_setoption(zone, DNS_ZONEOPT_NOCHECKNS, true);
 	dns_zone_setoption(zone, DNS_ZONEOPT_ZONEVERSION, false);
 	dns_zone_setcheckdstype(zone, dns_checkdstype_no);
-	dns_zone_setnotifytype(zone, dns_notifytype_no);
+	dns_zone_setnotifytype(zone, dns_rdatatype_soa, dns_notifytype_no);
+	dns_zone_setnotifytype(zone, dns_rdatatype_cds, dns_notifytype_no);
 	dns_zone_setautomatic(zone, true);
 	if (view->queryacl != NULL) {
 		dns_zone_setqueryacl(zone, view->queryacl);
@@ -3313,7 +3321,10 @@ create_ipv4only_zone(dns_zone_t *pzone, dns_view_t *view,
 		dns_zone_setstats(zone, named_g_server->zonestats);
 		dns_zone_setdbtype(zone, dbtypec, dbtype);
 		dns_zone_setcheckdstype(zone, dns_checkdstype_no);
-		dns_zone_setnotifytype(zone, dns_notifytype_no);
+		dns_zone_setnotifytype(zone, dns_rdatatype_soa,
+				       dns_notifytype_no);
+		dns_zone_setnotifytype(zone, dns_rdatatype_cds,
+				       dns_notifytype_no);
 		dns_zone_setautomatic(zone, true);
 		dns_zone_setoption(zone, DNS_ZONEOPT_NOCHECKNS, true);
 	} else {
@@ -6388,7 +6399,8 @@ add_keydata_zone(dns_view_t *view, const char *directory, isc_mem_t *mctx) {
 	dns_acl_detach(&none);
 
 	dns_zone_setcheckdstype(zone, dns_checkdstype_no);
-	dns_zone_setnotifytype(zone, dns_notifytype_no);
+	dns_zone_setnotifytype(zone, dns_rdatatype_soa, dns_notifytype_no);
+	dns_zone_setnotifytype(zone, dns_rdatatype_cds, dns_notifytype_no);
 	dns_zone_setoption(zone, DNS_ZONEOPT_NOCHECKNS, true);
 	dns_zone_setjournalsize(zone, 0);
 
@@ -6487,12 +6499,8 @@ tat_done(void *arg) {
 
 	dns_resolver_freefresp(&resp);
 	dns_resolver_destroyfetch(&tat->fetch);
-	if (dns_rdataset_isassociated(&tat->rdataset)) {
-		dns_rdataset_disassociate(&tat->rdataset);
-	}
-	if (dns_rdataset_isassociated(&tat->sigrdataset)) {
-		dns_rdataset_disassociate(&tat->sigrdataset);
-	}
+	dns_rdataset_cleanup(&tat->rdataset);
+	dns_rdataset_cleanup(&tat->sigrdataset);
 	dns_view_detach(&tat->view);
 	isc_mem_putanddetach(&tat->mctx, tat, sizeof(*tat));
 }
@@ -6636,9 +6644,7 @@ tat_send(void *arg) {
 	 * it succeeds.  Thus, we need to check whether 'nameservers' is
 	 * associated and release it if it is.
 	 */
-	if (dns_rdataset_isassociated(&nameservers)) {
-		dns_rdataset_disassociate(&nameservers);
-	}
+	dns_rdataset_cleanup(&nameservers);
 
 	if (result != ISC_R_SUCCESS) {
 		dns_view_detach(&tat->view);
@@ -13904,9 +13910,7 @@ named_server_signing(named_server_t *server, isc_lex_t *lex,
 	}
 
 cleanup:
-	if (dns_rdataset_isassociated(&privset)) {
-		dns_rdataset_disassociate(&privset);
-	}
+	dns_rdataset_cleanup(&privset);
 	if (node != NULL) {
 		dns_db_detachnode(&node);
 	}

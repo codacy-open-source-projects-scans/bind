@@ -24,6 +24,11 @@ from rollover.common import (
     size,
     TIMEDELTA,
 )
+from rollover.setup import (
+    configure_root,
+    configure_tld,
+    configure_zsk_prepub,
+)
 
 CONFIG = {
     "dnskey-ttl": TIMEDELTA["PT1H"],
@@ -57,6 +62,30 @@ OFFSETS["step6-p"] = OFFSETS["step5-p"] - int(CONFIG["purge-keys"].total_seconds
 OFFSETS["step6-s"] = OFFSETS["step5-s"] - int(CONFIG["purge-keys"].total_seconds())
 
 
+def bootstrap():
+    data = {
+        "tlds": [],
+        "trust_anchors": [],
+    }
+
+    tlds = []
+    for tld_name in [
+        "autosign",
+        "manual",
+    ]:
+        delegations = configure_zsk_prepub(tld_name)
+
+        tld = configure_tld(tld_name, delegations)
+        tlds.append(tld)
+
+        data["tlds"].append(tld_name)
+
+    ta = configure_root(tlds)
+    data["trust_anchors"].append(ta)
+
+    return data
+
+
 @pytest.mark.parametrize(
     "tld",
     [
@@ -86,6 +115,8 @@ def test_zsk_prepub_step1(tld, alg, size, ns3):
         "nextev": ZSK_LIFETIME - IPUB - timedelta(days=7),
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -143,6 +174,8 @@ def test_zsk_prepub_step2(tld, alg, size, ns3):
         "nextev": IPUB,
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -222,6 +255,8 @@ def test_zsk_prepub_step3(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
     # Force full resign and check all signatures have been replaced.
     with ns3.watch_log_from_here() as watcher:
         ns3.rndc(f"sign {zone}")
@@ -292,6 +327,8 @@ def test_zsk_prepub_step4(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -327,6 +364,8 @@ def test_zsk_prepub_step5(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -353,3 +392,5 @@ def test_zsk_prepub_step6(tld, alg, size, ns3):
         "nextev": None,
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log

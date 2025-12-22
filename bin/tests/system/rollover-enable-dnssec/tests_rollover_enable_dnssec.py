@@ -23,6 +23,11 @@ from rollover.common import (
     CDSS,
     TIMEDELTA,
 )
+from rollover.setup import (
+    configure_root,
+    configure_tld,
+    configure_enable_dnssec,
+)
 
 CONFIG = {
     "dnskey-ttl": TIMEDELTA["PT5M"],
@@ -45,6 +50,30 @@ OFFSETS["step1"] = 0
 OFFSETS["step2"] = -int(IPUB.total_seconds())
 OFFSETS["step3"] = -int(IRETZSK.total_seconds())
 OFFSETS["step4"] = -int(IPUBC.total_seconds() + IRETKSK.total_seconds())
+
+
+def bootstrap():
+    data = {
+        "tlds": [],
+        "trust_anchors": [],
+    }
+
+    tlds = []
+    for tld_name in [
+        "autosign",
+        "manual",
+    ]:
+        delegations = configure_enable_dnssec(tld_name, f"{POLICY}-{tld_name}")
+
+        tld = configure_tld(tld_name, delegations)
+        tlds.append(tld)
+
+        data["tlds"].append(tld_name)
+
+    ta = configure_root(tlds)
+    data["trust_anchors"].append(ta)
+
+    return data
 
 
 @pytest.mark.parametrize(
@@ -93,6 +122,8 @@ def test_rollover_enable_dnssec_step1(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -124,6 +155,8 @@ def test_rollover_enable_dnssec_step2(tld, alg, size, ns3):
         "nextev": IRETZSK - IPUB,
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -179,6 +212,11 @@ def test_rollover_enable_dnssec_step3(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    with ns3.watch_log_from_start() as watcher:
+        watcher.wait_for_line(
+            f"zone {zone}/IN (signed): dsyncfetch: send NOTIFY(CDS) query to scanner.{tld}"
+        )
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -208,3 +246,5 @@ def test_rollover_enable_dnssec_step4(tld, alg, size, ns3):
         "nextev": TIMEDELTA["PT1H"],
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log

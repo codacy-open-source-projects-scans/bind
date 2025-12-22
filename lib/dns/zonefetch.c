@@ -43,7 +43,10 @@ dns_zonefetch_run(void *arg) {
 	INSIST(view != NULL);
 	INSIST(loop != NULL);
 
-	fetch->fetchmethods.start_fetch(fetch);
+	result = fetch->fetchmethods.start_fetch(fetch);
+	if (result != ISC_R_SUCCESS) {
+		goto cancel;
+	}
 
 	result = dns_view_getresolver(view, &resolver);
 	if (result != ISC_R_SUCCESS) {
@@ -160,12 +163,8 @@ dns_zonefetch_done(void *arg) {
 cleanup:
 	isc_refcount_decrement(dns__zone_irefs(zone));
 
-	if (dns_rdataset_isassociated(rrset)) {
-		dns_rdataset_disassociate(rrset);
-	}
-	if (dns_rdataset_isassociated(sigset)) {
-		dns_rdataset_disassociate(sigset);
-	}
+	dns_rdataset_cleanup(rrset);
+	dns_rdataset_cleanup(sigset);
 
 	fetch->fetchmethods.cleanup_fetch(fetch);
 

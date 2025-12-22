@@ -642,9 +642,7 @@ configure_staticstub(const cfg_obj_t *zconfig, const cfg_obj_t *tconfig,
 	result = ISC_R_SUCCESS;
 
 cleanup:
-	if (dns_rdataset_isassociated(&rdataset)) {
-		dns_rdataset_disassociate(&rdataset);
-	}
+	dns_rdataset_cleanup(&rdataset);
 	if (apexnode != NULL) {
 		dns_db_detachnode(&apexnode);
 	}
@@ -1211,9 +1209,20 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 		notifytype = process_notifytype(notifytype, ztype, zname,
 						nodefault);
 		if (raw != NULL) {
-			dns_zone_setnotifytype(raw, dns_notifytype_no);
+			dns_zone_setnotifytype(raw, dns_rdatatype_soa,
+					       dns_notifytype_no);
 		}
-		dns_zone_setnotifytype(zone, notifytype);
+		dns_zone_setnotifytype(zone, dns_rdatatype_soa, notifytype);
+
+		obj = NULL;
+		result = named_config_get(maps, "notify-cds", &obj);
+		INSIST(result == ISC_R_SUCCESS && obj != NULL);
+		if (raw != NULL) {
+			dns_zone_setnotifytype(raw, dns_rdatatype_cds,
+					       dns_notifytype_no);
+		}
+		dns_zone_setnotifytype(zone, dns_rdatatype_cds,
+				       cfg_obj_asboolean(obj));
 
 		obj = NULL;
 		result = named_config_get(maps, "also-notify", &obj);
@@ -1475,7 +1484,10 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 			}
 		}
 	} else if (ztype == dns_zone_redirect) {
-		dns_zone_setnotifytype(zone, dns_notifytype_no);
+		dns_zone_setnotifytype(zone, dns_rdatatype_soa,
+				       dns_notifytype_no);
+		dns_zone_setnotifytype(zone, dns_rdatatype_cds,
+				       dns_notifytype_no);
 
 		obj = NULL;
 		result = named_config_get(maps, "max-journal-size", &obj);

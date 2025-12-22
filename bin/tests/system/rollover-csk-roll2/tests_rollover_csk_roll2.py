@@ -24,7 +24,11 @@ from rollover.common import (
     size,
     TIMEDELTA,
 )
-
+from rollover.setup import (
+    configure_root,
+    configure_tld,
+    configure_cskroll2,
+)
 
 CDSS = ["CDNSKEY", "CDS (SHA-256)", "CDS (SHA-384)"]
 CONFIG = {
@@ -68,6 +72,30 @@ OFFSETS["step7-p"] = OFFSETS["step6-p"] - int(timedelta(days=90).total_seconds()
 OFFSETS["step7-s"] = OFFSETS["step6-s"] - int(timedelta(days=90).total_seconds())
 
 
+def bootstrap():
+    data = {
+        "tlds": [],
+        "trust_anchors": [],
+    }
+
+    tlds = []
+    for tld_name in [
+        "autosign",
+        "manual",
+    ]:
+        delegations = configure_cskroll2(tld_name, f"{POLICY}-{tld_name}")
+
+        tld = configure_tld(tld_name, delegations)
+        tlds.append(tld)
+
+        data["tlds"].append(tld_name)
+
+    ta = configure_root(tlds)
+    data["trust_anchors"].append(ta)
+
+    return data
+
+
 @pytest.mark.parametrize(
     "tld",
     [
@@ -97,6 +125,8 @@ def test_csk_roll2_step1(tld, alg, size, ns3):
         "nextev": CSK_LIFETIME - IPUB - TIMEDELTA["P7D"],
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -155,6 +185,8 @@ def test_csk_roll2_step2(tld, alg, size, ns3):
         "nextev": IPUB,
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -243,6 +275,11 @@ def test_csk_roll2_step3(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    with ns3.watch_log_from_start() as watcher:
+        watcher.wait_for_line(
+            f"zone {zone}/IN (signed): dsyncfetch: send NOTIFY(CDS) query to scanner.{tld}"
+        )
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -281,6 +318,8 @@ def test_csk_roll2_step4(tld, alg, size, ns3):
         "ds-swap": False,
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -346,6 +385,8 @@ def test_csk_roll2_step5(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -381,6 +422,8 @@ def test_csk_roll2_step6(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -411,3 +454,5 @@ def test_csk_roll2_step7(tld, alg, size, ns3):
         "verbose": True,
     }
     isctest.kasp.check_rollover_step(ns3, CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log

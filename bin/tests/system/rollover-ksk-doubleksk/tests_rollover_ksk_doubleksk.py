@@ -30,7 +30,11 @@ from rollover.common import (
     KSK_KEYTTLPROP,
     TIMEDELTA,
 )
-
+from rollover.setup import (
+    configure_root,
+    configure_tld,
+    configure_ksk_doubleksk,
+)
 
 CDSS = ["CDS (SHA-256)"]
 POLICY = "ksk-doubleksk"
@@ -46,6 +50,30 @@ OFFSETS["step5-p"] = OFFSETS["step4-p"] - int(KSK_KEYTTLPROP.total_seconds())
 OFFSETS["step5-s"] = OFFSETS["step4-s"] - int(KSK_KEYTTLPROP.total_seconds())
 OFFSETS["step6-p"] = OFFSETS["step5-p"] - int(KSK_CONFIG["purge-keys"].total_seconds())
 OFFSETS["step6-s"] = OFFSETS["step5-s"] - int(KSK_CONFIG["purge-keys"].total_seconds())
+
+
+def bootstrap():
+    data = {
+        "tlds": [],
+        "trust_anchors": [],
+    }
+
+    tlds = []
+    for tld_name in [
+        "autosign",
+        "manual",
+    ]:
+        delegations = configure_ksk_doubleksk(tld_name)
+
+        tld = configure_tld(tld_name, delegations)
+        tlds.append(tld)
+
+        data["tlds"].append(tld_name)
+
+    ta = configure_root(tlds)
+    data["trust_anchors"].append(ta)
+
+    return data
 
 
 @pytest.mark.parametrize(
@@ -78,6 +106,8 @@ def test_ksk_doubleksk_step1(tld, alg, size, ns3):
         "nextev": KSK_LIFETIME - KSK_IPUB - timedelta(days=7),
     }
     isctest.kasp.check_rollover_step(ns3, KSK_CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -137,6 +167,8 @@ def test_ksk_doubleksk_step2(tld, alg, size, ns3):
         "nextev": KSK_IPUB,
     }
     isctest.kasp.check_rollover_step(ns3, KSK_CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
 
 
 @pytest.mark.parametrize(
@@ -218,6 +250,11 @@ def test_ksk_doubleksk_step3(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, KSK_CONFIG, policy, step)
 
+    with ns3.watch_log_from_start() as watcher:
+        watcher.wait_for_line(
+            f"zone {zone}/IN (signed): dsyncfetch: send NOTIFY(CDS) query to scanner.{tld}"
+        )
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -284,6 +321,8 @@ def test_ksk_doubleksk_step4(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, KSK_CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -321,6 +360,8 @@ def test_ksk_doubleksk_step5(tld, alg, size, ns3):
     }
     isctest.kasp.check_rollover_step(ns3, KSK_CONFIG, policy, step)
 
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
+
 
 @pytest.mark.parametrize(
     "tld",
@@ -348,3 +389,5 @@ def test_ksk_doubleksk_step6(tld, alg, size, ns3):
         "nextev": None,
     }
     isctest.kasp.check_rollover_step(ns3, KSK_CONFIG, policy, step)
+
+    assert f"zone {zone}/IN (signed): dsyncfetch" not in ns3.log
