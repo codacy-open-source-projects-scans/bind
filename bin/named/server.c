@@ -4620,20 +4620,27 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	 *	Configure the views rrset-order.
 	 */
 	{
-		const cfg_obj_t *rrsetorder = NULL;
-
-		(void)named_config_get(maps, "rrset-order", &rrsetorder);
-		dns_order_create(mctx, &order);
-		CFG_LIST_FOREACH(rrsetorder, element) {
-			const cfg_obj_t *ent = cfg_listelt_value(element);
-
-			CHECK(configure_order(order, ent));
-		}
+		/*
+		 * Detach the old order
+		 */
 		if (view->order != NULL) {
 			dns_order_detach(&view->order);
 		}
-		dns_order_attach(order, &view->order);
-		dns_order_detach(&order);
+
+		const cfg_obj_t *rrsetorder = NULL;
+		if (ISC_R_SUCCESS ==
+		    named_config_get(maps, "rrset-order", &rrsetorder))
+		{
+			dns_order_create(mctx, &order);
+			CFG_LIST_FOREACH(rrsetorder, element) {
+				const cfg_obj_t *ent =
+					cfg_listelt_value(element);
+
+				CHECK(configure_order(order, ent));
+			}
+			dns_order_attach(order, &view->order);
+			dns_order_detach(&order);
+		}
 	}
 	/*
 	 * Copy the aclenv object.
@@ -6591,20 +6598,19 @@ tat_send(void *arg) {
 			domain, &nameservers, NULL, NULL, 0, 0, 0, NULL, NULL,
 			NULL, tat->loop, tat_done, tat, NULL, &tat->rdataset,
 			&tat->sigrdataset, &tat->fetch);
+
+		/*
+		 * dns_resolver_createfetch() will create its own copy of
+		 * nameservers.
+		 */
+		dns_rdataset_cleanup(&nameservers);
 	}
 
 	/*
 	 * 'domain' holds the dns_name_t pointer inside a dst_key_t structure.
 	 * dns_resolver_createfetch() creates its own copy of 'domain' if it
 	 * succeeds.  Thus, 'domain' is not freed here.
-	 *
-	 * Even if dns_view_findzonecut() returned something else than
-	 * ISC_R_SUCCESS, it still could have associated 'nameservers'.
-	 * dns_resolver_createfetch() creates its own copy of 'nameservers' if
-	 * it succeeds.  Thus, we need to check whether 'nameservers' is
-	 * associated and release it if it is.
 	 */
-	dns_rdataset_cleanup(&nameservers);
 
 	if (result != ISC_R_SUCCESS) {
 		dns_view_detach(&tat->view);
