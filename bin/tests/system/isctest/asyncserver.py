@@ -21,6 +21,7 @@ from typing import (
     List,
     Optional,
     Set,
+    Sequence,
     Tuple,
     Union,
     cast,
@@ -355,12 +356,28 @@ class DnsResponseSend(ResponseAction):
     response: dns.message.Message
     authoritative: Optional[bool] = None
     delay: float = 0.0
+    acknowledge_hand_rolled_response: bool = False
 
     async def perform(self) -> Optional[Union[dns.message.Message, bytes]]:
         """
         Yield a potentially delayed response that is a dns.message.Message.
         """
         assert isinstance(self.response, dns.message.Message)
+        if not (
+            _is_asyncserver_response(self.response)
+            or self.acknowledge_hand_rolled_response
+        ):
+            error = "The response you are trying to send was not created using "
+            error += "AsyncDnsServer's response preparation methods. "
+            error += "This will break features such as automatic AA flag "
+            error += "and RCODE handling. If you need a fresh copy of a "
+            error += "response, use `QueryContext.prepare_new_response` "
+            error += "instead of `dns.message.make_response`. "
+            error += "To acknowledge this and proceed anyway, set "
+            error += "`acknowledge_hand_rolled_response=True` in "
+            error += "DnsResponseSend's constructor."
+            raise RuntimeError(error)
+
         if self.authoritative is not None:
             if self.authoritative:
                 self.response.flags |= dns.flags.AA
@@ -413,10 +430,9 @@ class _ConnectionTeardownRequested(Exception):
 
 
 @dataclass
-class ResponseDropAndCloseConnection(ResponseAction):
+class CloseConnection(ResponseAction):
     """
-    Action which makes the server close the connection after the DNS query is
-    received by the server (TCP only).
+    Action which makes the server close the connection (TCP only).
 
     The connection may be closed with a delay if requested.
     """
@@ -539,8 +555,8 @@ class ConnectionReset(ConnectionHandler):
     make the server send an RST segment; this happens when the server closes a
     client's socket while there is still unread data in that socket's buffer.
     If closing the connection _after_ the query is read by the server is enough
-    for a given use case, the ResponseDropAndCloseConnection response handler
-    should be used instead.
+    for a given use case, the CloseConnection response handler should be used
+    instead.
     """
 
     delay: float = 0.0
@@ -802,6 +818,19 @@ class _NoKeyringType:
     pass
 
 
+_ASYNCSERVER_RESPONSE_MARKER = "__is_asyncserver_response__"
+
+
+def _make_asyncserver_response(query: dns.message.Message) -> dns.message.Message:
+    response = dns.message.make_response(query)
+    setattr(response, _ASYNCSERVER_RESPONSE_MARKER, True)
+    return response
+
+
+def _is_asyncserver_response(message: dns.message.Message) -> bool:
+    return getattr(message, _ASYNCSERVER_RESPONSE_MARKER, False)
+
+
 class AsyncDnsServer(AsyncServer):
     """
     DNS server which responds to queries based on zone data and/or custom
@@ -859,9 +888,17 @@ class AsyncDnsServer(AsyncServer):
         else:
             self._response_handlers.append(handler)
 
-    def install_response_handlers(self, handlers: List[ResponseHandler]) -> None:
+    def install_response_handlers(self, *handlers: ResponseHandler) -> None:
         for handler in handlers:
             self.install_response_handler(handler)
+
+    def replace_response_handlers(self, *new_handlers: ResponseHandler) -> None:
+        """
+        Uninstall all currently installed handlers and install the provided ones.
+        """
+        logging.info("Uninstalling response handlers: %s", str(self._response_handlers))
+        self._response_handlers.clear()
+        self.install_response_handlers(*new_handlers)
 
     def uninstall_response_handler(self, handler: ResponseHandler) -> None:
         """
@@ -1119,7 +1156,7 @@ class AsyncDnsServer(AsyncServer):
         except dns.exception.DNSException as exc:
             logging.error("Invalid query from %s (%s): %s", peer, wire.hex(), exc)
             return
-        response_stub = dns.message.make_response(query)
+        response_stub = _make_asyncserver_response(query)
         qctx = QueryContext(query, response_stub, peer, protocol)
         self._log_query(qctx, peer, protocol)
         responses = self._prepare_responses(qctx)
@@ -1352,7 +1389,7 @@ class ControllableAsyncDnsServer(AsyncDnsServer):
     def _commands(self) -> Dict[dns.name.Name, "ControlCommand"]:
         return {}
 
-    def install_control_commands(self, commands: List["ControlCommand"]) -> None:
+    def install_control_commands(self, *commands: "ControlCommand") -> None:
         for command in commands:
             self.install_control_command(command)
 
@@ -1528,3 +1565,30 @@ class ToggleResponsesCommand(ControlCommand):
         logging.error("Unrecognized response sending mode '%s'", mode)
         qctx.response.set_rcode(dns.rcode.SERVFAIL)
         return f"unrecognized response sending mode '{mode}'"
+
+
+class SwitchControlCommand(ControlCommand):
+    """
+    Switch the server's response handlers based on the control query.
+
+    A sequence of response handlers is associated with each key.  When a
+    control query is received, the server's response handlers are replaced
+    with the sequence associated with the key extracted from the control
+    query.
+    """
+
+    control_subdomain = "switch"
+
+    def __init__(self, handler_mapping: Dict[str, Sequence[ResponseHandler]]):
+        self._handler_mapping = handler_mapping
+
+    def handle(
+        self, args: List[str], server: ControllableAsyncDnsServer, qctx: QueryContext
+    ) -> Optional[str]:
+        if len(args) != 1 or args[0] not in self._handler_mapping:
+            logging.error("Invalid %s query %s", self, qctx.qname)
+            qctx.response.set_rcode(dns.rcode.SERVFAIL)
+            return f"invalid query; exactly one of {list(self._handler_mapping.keys())} is expected in QNAME"
+
+        server.replace_response_handlers(*self._handler_mapping[args[0]])
+        return f"switched to handler set '{args[0]}'"
