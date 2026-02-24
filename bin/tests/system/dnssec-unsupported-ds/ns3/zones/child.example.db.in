@@ -9,12 +9,10 @@
 ; See the COPYRIGHT file distributed with this work for additional
 ; information regarding copyright ownership.
 
-stale.			IN SOA	ns.stale. matthijs.isc.org. 1 0 0 0 0
-stale.			IN NS	ns.stale.
-ns.stale.		IN A    10.53.0.6
-
-serve.stale.		IN NS	ns.serve.stale.
-ns.serve.stale.		IN A    10.53.0.6
-
-target.stale.		IN NS	ns.target.stale.
-ns.target.stale.	IN A	10.53.0.7
+child.example.	300	IN	SOA	ns1.child.example. admin.child.example. 2026021901 3600 900 86400 300
+api.child.example.	300	IN	A	192.0.2.102
+child.example.	300	IN	MX	10 mail.child.example.
+mail.child.example.	300	IN	A	192.0.2.101
+www.child.example.	300	IN	A	192.0.2.100
+ns1.child.example.	300	IN	A	10.53.0.3
+child.example.	300	IN	NS	ns1.child.example.

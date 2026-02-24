@@ -9,12 +9,8 @@
 ; See the COPYRIGHT file distributed with this work for additional
 ; information regarding copyright ownership.
 
-stale.			IN SOA	ns.stale. matthijs.isc.org. 1 0 0 0 0
-stale.			IN NS	ns.stale.
-ns.stale.		IN A    10.53.0.6
-
-serve.stale.		IN NS	ns.serve.stale.
-ns.serve.stale.		IN A    10.53.0.6
-
-target.stale.		IN NS	ns.target.stale.
-ns.target.stale.	IN A	10.53.0.7
+.	300	IN	SOA	gson.nominum.com. a.root.servers.nil. 2000042100 600 600 1200 600
+ns2.example.	300	IN	A	10.53.0.2
+example.	300	IN	NS	ns2.example.
+a.root-servers.nil.	300	IN	A	10.53.0.1
+.	300	IN	NS	a.root-servers.nil.
