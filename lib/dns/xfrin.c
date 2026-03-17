@@ -80,7 +80,13 @@ typedef enum {
  * Incoming zone transfer context.
  */
 
-typedef struct dns_ixfr dns_ixfr_t;
+typedef struct dns_ixfr {
+	uint32_t diffs;
+	uint32_t maxdiffs;
+	uint32_t request_serial;
+	uint32_t current_serial;
+	dns_journal_t *journal;
+} dns_ixfr_t;
 
 struct dns_xfrin {
 	unsigned int magic;
@@ -174,13 +180,7 @@ struct dns_xfrin {
 	 */
 	dns_rdatacallbacks_t axfr;
 
-	struct dns_ixfr {
-		uint32_t diffs;
-		uint32_t maxdiffs;
-		uint32_t request_serial;
-		uint32_t current_serial;
-		dns_journal_t *journal;
-	} ixfr;
+	dns_ixfr_t ixfr;
 
 	dns_rdata_t firstsoa;
 	unsigned char *firstsoa_data;
@@ -686,6 +686,9 @@ ixfr_commit(dns_xfrin_t *xfr) {
 	}
 
 cleanup:
+	if (result != ISC_R_SUCCESS) {
+		isc_mem_put(xfr->mctx, data, sizeof(*data));
+	}
 	return result;
 }
 
@@ -2062,8 +2065,8 @@ cleanup:
 	if (msg != NULL) {
 		dns_message_detach(&msg);
 	}
-	dns_xfrin_detach(&xfr);
 	LIBDNS_XFRIN_RECV_DONE(xfr, xfr->info, result);
+	dns_xfrin_detach(&xfr);
 }
 
 static void
