@@ -190,25 +190,6 @@ client_trace(ns_client_t *client, int level, const char *message) {
 
 #define SFCACHE_CDFLAG 0x1
 
-/*
- * SAVE and RESTORE have the same semantics as:
- *
- * 	foo_attach(b, &a);
- *	foo_detach(&b);
- *
- * without the locking and magic testing.
- *
- * We use the names SAVE and RESTORE to show the operation being performed,
- * even though the two macros are identical.
- */
-#define SAVE(a, b)                 \
-	do {                       \
-		INSIST(a == NULL); \
-		a = b;             \
-		b = NULL;          \
-	} while (0)
-#define RESTORE(a, b) SAVE(a, b)
-
 static atomic_uint_fast32_t last_rpznotready_log = 0;
 
 static bool
@@ -3086,14 +3067,14 @@ rpz_rrset_find(ns_client_t *client, dns_name_t *name, dns_rdatatype_t type,
 	       unsigned int options, dns_rpz_type_t rpz_type, dns_db_t **dbp,
 	       dns_dbversion_t *version, dns_rdataset_t **rdatasetp,
 	       bool resuming) {
-	dns_rpz_st_t *st;
-	bool is_zone;
-	dns_dbnode_t *node;
-	dns_fixedname_t fixed;
-	dns_name_t *found;
 	isc_result_t result;
+	dns_rpz_st_t *st = NULL;
+	dns_dbnode_t *node = NULL;
+	dns_fixedname_t fixed;
+	dns_name_t *found = dns_fixedname_initname(&fixed);
 	dns_clientinfomethods_t cm;
 	dns_clientinfo_t ci;
+	bool is_zone;
 
 	CTRACE(ISC_LOG_DEBUG(3), "rpz_rrset_find");
 
@@ -3104,11 +3085,11 @@ rpz_rrset_find(ns_client_t *client, dns_name_t *name, dns_rdatatype_t type,
 		INSIST(*rdatasetp == NULL ||
 		       !dns_rdataset_isassociated(*rdatasetp));
 		st->state &= ~DNS_RPZ_RECURSING;
-		RESTORE(*dbp, st->r.db);
+		*dbp = MOVE_OWNERSHIP(st->r.db);
 		if (*rdatasetp != NULL) {
 			ns_client_putrdataset(client, rdatasetp);
 		}
-		RESTORE(*rdatasetp, st->r.r_rdataset);
+		*rdatasetp = MOVE_OWNERSHIP(st->r.r_rdataset);
 		result = st->r.r_result;
 		if (result == DNS_R_DELEGATION) {
 			CTRACE(ISC_LOG_ERROR, "RPZ recursing");
@@ -3128,29 +3109,23 @@ rpz_rrset_find(ns_client_t *client, dns_name_t *name, dns_rdatatype_t type,
 	if (*dbp != NULL) {
 		is_zone = false;
 	} else {
-		dns_zone_t *zone;
+		dns_zone_t *zone = NULL;
 
 		version = NULL;
-		zone = NULL;
 		result = query_getdb(client, name, type,
 				     (dns_getdb_options_t){ 0 }, &zone, dbp,
 				     &version, &is_zone);
+		if (zone != NULL) {
+			dns_zone_detach(&zone);
+		}
 		if (result != ISC_R_SUCCESS) {
 			rpz_log_fail(client, DNS_RPZ_ERROR_LEVEL, name,
 				     rpz_type, "rpz_rrset_find(2)", result);
 			st->m.policy = DNS_RPZ_POLICY_ERROR;
-			if (zone != NULL) {
-				dns_zone_detach(&zone);
-			}
 			return result;
-		}
-		if (zone != NULL) {
-			dns_zone_detach(&zone);
 		}
 	}
 
-	node = NULL;
-	found = dns_fixedname_initname(&fixed);
 	dns_clientinfomethods_init(&cm, ns_client_sourceip);
 	dns_clientinfo_init(&ci, client, NULL);
 	result = dns_db_findext(*dbp, name, version, type, options,
@@ -3159,14 +3134,19 @@ rpz_rrset_find(ns_client_t *client, dns_name_t *name, dns_rdatatype_t type,
 	if (result == DNS_R_DELEGATION && is_zone && USECACHE(client)) {
 		/*
 		 * Try the cache if we're authoritative for an
-		 * ancestor but not the domain itself.
+		 * ancestor but not the domain itself. DELEGATION or
+		 * NOTFOUND indicates that we should recurse, if
+		 * nsip-wait-recurse or nsdname-wait-recurse are
+		 * enabled.
 		 */
 		rpz_clean(NULL, dbp, &node, rdatasetp);
-		version = NULL;
 		dns_db_attach(client->inner.view->cachedb, dbp);
-		result = dns_db_findext(*dbp, name, version, type, 0,
+		result = dns_db_findext(*dbp, name, NULL, type, 0,
 					client->inner.now, &node, found, &cm,
 					&ci, *rdatasetp, NULL);
+		if (result == ISC_R_NOTFOUND) {
+			result = DNS_R_DELEGATION;
+		}
 	}
 	rpz_clean(NULL, dbp, &node, NULL);
 	if (result == DNS_R_DELEGATION) {
@@ -3177,13 +3157,11 @@ rpz_rrset_find(ns_client_t *client, dns_name_t *name, dns_rdatatype_t type,
 		 */
 		if (rpz_type == DNS_RPZ_TYPE_IP) {
 			result = DNS_R_NXRRSET;
-		} else if (!client->inner.view->rpzs->p.nsip_wait_recurse ||
-			   (!client->inner.view->rpzs->p.nsdname_wait_recurse &&
+		} else if ((client->inner.view->rpzs->p.nsip_wait_recurse &&
+			    rpz_type == DNS_RPZ_TYPE_NSIP) ||
+			   (client->inner.view->rpzs->p.nsdname_wait_recurse &&
 			    rpz_type == DNS_RPZ_TYPE_NSDNAME))
 		{
-			query_rpzfetch(client, name, type);
-			result = DNS_R_NXRRSET;
-		} else {
 			dns_name_copy(name, st->r_name);
 			result = ns_query_recurse(client, type, st->r_name,
 						  NULL, NULL, resuming);
@@ -3191,6 +3169,9 @@ rpz_rrset_find(ns_client_t *client, dns_name_t *name, dns_rdatatype_t type,
 				st->state |= DNS_RPZ_RECURSING;
 				result = DNS_R_DELEGATION;
 			}
+		} else {
+			query_rpzfetch(client, name, type);
+			result = DNS_R_NXRRSET;
 		}
 	}
 	return result;
@@ -3437,22 +3418,22 @@ rpz_save_p(dns_rpz_st_t *st, dns_rpz_zone_t *rpz, dns_rpz_type_t rpz_type,
 	dns_name_copy(p_name, st->p_name);
 	st->m.prefix = prefix;
 	st->m.result = result;
-	SAVE(st->m.zone, *zonep);
-	SAVE(st->m.db, *dbp);
-	SAVE(st->m.node, *nodep);
+	st->m.zone = MOVE_OWNERSHIP(*zonep);
+	st->m.db = MOVE_OWNERSHIP(*dbp);
+	st->m.node = MOVE_OWNERSHIP(*nodep);
 	if (*rdatasetp != NULL && dns_rdataset_isassociated(*rdatasetp)) {
 		/*
 		 * Save the replacement rdataset from the policy
 		 * and make the previous replacement rdataset scratch.
 		 */
-		SAVE(trdataset, st->m.rdataset);
-		SAVE(st->m.rdataset, *rdatasetp);
-		SAVE(*rdatasetp, trdataset);
+		trdataset = MOVE_OWNERSHIP(st->m.rdataset);
+		st->m.rdataset = MOVE_OWNERSHIP(*rdatasetp);
+		*rdatasetp = MOVE_OWNERSHIP(trdataset);
 		st->m.ttl = ISC_MIN(st->m.rdataset->ttl, rpz->max_policy_ttl);
 	} else {
 		st->m.ttl = ISC_MIN(DNS_RPZ_TTL_DEFAULT, rpz->max_policy_ttl);
 	}
-	SAVE(st->m.version, version);
+	st->m.version = MOVE_OWNERSHIP(version);
 }
 
 /*
@@ -4696,7 +4677,8 @@ dns64_aaaaok(ns_client_t *client, dns_rdataset_t *rdataset,
 	{
 		for (i = 0; i < count; i++) {
 			if (aaaaok != NULL && !aaaaok[i]) {
-				SAVE(client->query.dns64_aaaaok, aaaaok);
+				client->query.dns64_aaaaok =
+					MOVE_OWNERSHIP(aaaaok);
 				client->query.dns64_aaaaoklen = count;
 				break;
 			}
@@ -5122,15 +5104,6 @@ qctx_deinit(query_ctx_t *qctx) {
 }
 
 /*
- * Call SAVE but set 'a' to NULL first so as not to assert.
- */
-#define INITANDSAVE(a, b)   \
-	do {                \
-		a = NULL;   \
-		SAVE(a, b); \
-	} while (0)
-
-/*
  * "save" qctx data from 'src' to 'tgt'.
  * It essentially moves ownership of the data from src to tgt, so the former
  * becomes unusable except for final cleanup (such as by qctx_destroy).
@@ -5148,24 +5121,24 @@ qctx_save(query_ctx_t *src, query_ctx_t **targetp) {
 	*target = *src;
 
 	/* Then "move" pointers (except client and view) */
-	INITANDSAVE(target->dbuf, src->dbuf);
-	INITANDSAVE(target->fname, src->fname);
-	INITANDSAVE(target->tname, src->tname);
-	INITANDSAVE(target->rdataset, src->rdataset);
-	INITANDSAVE(target->sigrdataset, src->sigrdataset);
-	INITANDSAVE(target->noqname, src->noqname);
-	INITANDSAVE(target->fresp, src->fresp);
-	INITANDSAVE(target->db, src->db);
-	INITANDSAVE(target->version, src->version);
-	INITANDSAVE(target->node, src->node);
-	INITANDSAVE(target->zdb, src->zdb);
-	INITANDSAVE(target->znode, src->znode);
-	INITANDSAVE(target->zfname, src->zfname);
-	INITANDSAVE(target->zversion, src->zversion);
-	INITANDSAVE(target->zrdataset, src->zrdataset);
-	INITANDSAVE(target->zsigrdataset, src->zsigrdataset);
-	INITANDSAVE(target->rpz_st, src->rpz_st);
-	INITANDSAVE(target->zone, src->zone);
+	target->dbuf = MOVE_OWNERSHIP(src->dbuf);
+	target->fname = MOVE_OWNERSHIP(src->fname);
+	target->tname = MOVE_OWNERSHIP(src->tname);
+	target->rdataset = MOVE_OWNERSHIP(src->rdataset);
+	target->sigrdataset = MOVE_OWNERSHIP(src->sigrdataset);
+	target->noqname = MOVE_OWNERSHIP(src->noqname);
+	target->fresp = MOVE_OWNERSHIP(src->fresp);
+	target->db = MOVE_OWNERSHIP(src->db);
+	target->version = MOVE_OWNERSHIP(src->version);
+	target->node = MOVE_OWNERSHIP(src->node);
+	target->zdb = MOVE_OWNERSHIP(src->zdb);
+	target->znode = MOVE_OWNERSHIP(src->znode);
+	target->zfname = MOVE_OWNERSHIP(src->zfname);
+	target->zversion = MOVE_OWNERSHIP(src->zversion);
+	target->zrdataset = MOVE_OWNERSHIP(src->zrdataset);
+	target->zsigrdataset = MOVE_OWNERSHIP(src->zsigrdataset);
+	target->rpz_st = MOVE_OWNERSHIP(src->rpz_st);
+	target->zone = MOVE_OWNERSHIP(src->zone);
 
 	/* View has to stay in 'src' for qctx_destroy. */
 	target->view = NULL;
@@ -5515,10 +5488,9 @@ ns__query_start(query_ctx_t *qctx) {
 				dns_zone_detach(&qctx->zone);
 				qctx->zhooks = NULL;
 			}
-			qctx->version = NULL;
-			RESTORE(qctx->version, tversion);
-			RESTORE(qctx->db, tdb);
-			RESTORE(qctx->zone, tzone);
+			qctx->version = MOVE_OWNERSHIP(tversion);
+			qctx->db = MOVE_OWNERSHIP(tdb);
+			qctx->zone = MOVE_OWNERSHIP(tzone);
 			qctx->is_zone = true;
 			result = ISC_R_SUCCESS;
 		} else {
@@ -6088,7 +6060,7 @@ fetch_callback(void *arg) {
 	}
 	UNLOCK(&client->query.fetchlock);
 
-	SAVE(fetch, resp->fetch);
+	fetch = MOVE_OWNERSHIP(resp->fetch);
 
 	/*
 	 * We're done recursing, detach from quota and unlink from
@@ -6386,19 +6358,20 @@ query_resume(query_ctx_t *qctx) {
 
 		qctx->is_zone = qctx->rpz_st->q.is_zone;
 		qctx->authoritative = qctx->rpz_st->q.authoritative;
-		RESTORE(qctx->zone, qctx->rpz_st->q.zone);
-		RESTORE(qctx->node, qctx->rpz_st->q.node);
-		RESTORE(qctx->db, qctx->rpz_st->q.db);
-		RESTORE(qctx->rdataset, qctx->rpz_st->q.rdataset);
-		RESTORE(qctx->sigrdataset, qctx->rpz_st->q.sigrdataset);
+		qctx->zone = MOVE_OWNERSHIP(qctx->rpz_st->q.zone);
+		qctx->node = MOVE_OWNERSHIP(qctx->rpz_st->q.node);
+		qctx->db = MOVE_OWNERSHIP(qctx->rpz_st->q.db);
+		qctx->rdataset = MOVE_OWNERSHIP(qctx->rpz_st->q.rdataset);
+		qctx->sigrdataset = MOVE_OWNERSHIP(qctx->rpz_st->q.sigrdataset);
 		qctx->qtype = qctx->rpz_st->q.qtype;
 
 		if (qctx->fresp->node != NULL) {
 			dns_db_detachnode(&qctx->fresp->node);
 		}
-		SAVE(qctx->rpz_st->r.db, qctx->fresp->cache);
+		qctx->rpz_st->r.db = MOVE_OWNERSHIP(qctx->fresp->cache);
 		qctx->rpz_st->r.r_type = qctx->fresp->qtype;
-		SAVE(qctx->rpz_st->r.r_rdataset, qctx->fresp->rdataset);
+		qctx->rpz_st->r.r_rdataset =
+			MOVE_OWNERSHIP(qctx->fresp->rdataset);
 		ns_client_putrdataset(qctx->client, &qctx->fresp->sigrdataset);
 	} else if (REDIRECT(qctx->client)) {
 		/*
@@ -6417,12 +6390,13 @@ query_resume(query_ctx_t *qctx) {
 #endif /* ifdef WANT_QUERYTRACE */
 		qctx->qtype = qctx->client->query.redirect.qtype;
 		INSIST(qctx->client->query.redirect.rdataset != NULL);
-		RESTORE(qctx->rdataset, qctx->client->query.redirect.rdataset);
-		RESTORE(qctx->sigrdataset,
+		qctx->rdataset =
+			MOVE_OWNERSHIP(qctx->client->query.redirect.rdataset);
+		qctx->sigrdataset = MOVE_OWNERSHIP(
 			qctx->client->query.redirect.sigrdataset);
-		RESTORE(qctx->db, qctx->client->query.redirect.db);
-		RESTORE(qctx->node, qctx->client->query.redirect.node);
-		RESTORE(qctx->zone, qctx->client->query.redirect.zone);
+		qctx->db = MOVE_OWNERSHIP(qctx->client->query.redirect.db);
+		qctx->node = MOVE_OWNERSHIP(qctx->client->query.redirect.node);
+		qctx->zone = MOVE_OWNERSHIP(qctx->client->query.redirect.zone);
 		qctx->authoritative =
 			qctx->client->query.redirect.authoritative;
 
@@ -6442,10 +6416,10 @@ query_resume(query_ctx_t *qctx) {
 		qctx->authoritative = false;
 
 		qctx->qtype = qctx->fresp->qtype;
-		SAVE(qctx->db, qctx->fresp->cache);
-		SAVE(qctx->node, qctx->fresp->node);
-		SAVE(qctx->rdataset, qctx->fresp->rdataset);
-		SAVE(qctx->sigrdataset, qctx->fresp->sigrdataset);
+		qctx->db = MOVE_OWNERSHIP(qctx->fresp->cache);
+		qctx->node = MOVE_OWNERSHIP(qctx->fresp->node);
+		qctx->rdataset = MOVE_OWNERSHIP(qctx->fresp->rdataset);
+		qctx->sigrdataset = MOVE_OWNERSHIP(qctx->fresp->sigrdataset);
 	}
 	INSIST(qctx->rdataset != NULL);
 
@@ -6546,7 +6520,7 @@ query_hookresume(void *arg) {
 		canceled = true;
 	}
 	UNLOCK(&client->query.fetchlock);
-	SAVE(hctx, rev->ctx);
+	hctx = MOVE_OWNERSHIP(rev->ctx);
 
 	release_recursionquota(client);
 
@@ -7019,11 +6993,11 @@ query_checkrpz(query_ctx_t *qctx, isc_result_t result) {
 		qctx->rpz_st->q.qtype = qctx->qtype;
 		qctx->rpz_st->q.is_zone = qctx->is_zone;
 		qctx->rpz_st->q.authoritative = qctx->authoritative;
-		SAVE(qctx->rpz_st->q.zone, qctx->zone);
-		SAVE(qctx->rpz_st->q.db, qctx->db);
-		SAVE(qctx->rpz_st->q.node, qctx->node);
-		SAVE(qctx->rpz_st->q.rdataset, qctx->rdataset);
-		SAVE(qctx->rpz_st->q.sigrdataset, qctx->sigrdataset);
+		qctx->rpz_st->q.zone = MOVE_OWNERSHIP(qctx->zone);
+		qctx->rpz_st->q.db = MOVE_OWNERSHIP(qctx->db);
+		qctx->rpz_st->q.node = MOVE_OWNERSHIP(qctx->node);
+		qctx->rpz_st->q.rdataset = MOVE_OWNERSHIP(qctx->rdataset);
+		qctx->rpz_st->q.sigrdataset = MOVE_OWNERSHIP(qctx->sigrdataset);
 		dns_name_copy(qctx->fname, qctx->rpz_st->fname);
 		qctx->rpz_st->q.result = result;
 		qctx->client->query.attributes |= NS_QUERYATTR_RECURSING;
@@ -7053,16 +7027,17 @@ query_checkrpz(query_ctx_t *qctx, isc_result_t result) {
 		rpz_clean(&qctx->zone, &qctx->db, &qctx->node, NULL);
 		if (qctx->rpz_st->m.rdataset != NULL) {
 			ns_client_putrdataset(qctx->client, &qctx->rdataset);
-			RESTORE(qctx->rdataset, qctx->rpz_st->m.rdataset);
+			qctx->rdataset =
+				MOVE_OWNERSHIP(qctx->rpz_st->m.rdataset);
 		} else {
 			qctx_clean(qctx);
 		}
 		qctx->version = NULL;
 
-		RESTORE(qctx->node, qctx->rpz_st->m.node);
-		RESTORE(qctx->db, qctx->rpz_st->m.db);
-		RESTORE(qctx->version, qctx->rpz_st->m.version);
-		RESTORE(qctx->zone, qctx->rpz_st->m.zone);
+		qctx->node = MOVE_OWNERSHIP(qctx->rpz_st->m.node);
+		qctx->db = MOVE_OWNERSHIP(qctx->rpz_st->m.db);
+		qctx->version = MOVE_OWNERSHIP(qctx->rpz_st->m.version);
+		qctx->zone = MOVE_OWNERSHIP(qctx->rpz_st->m.zone);
 
 		/*
 		 * Add SOA record to additional section
@@ -8008,8 +7983,9 @@ query_respond(query_ctx_t *qctx) {
 		 * Look to see if there are A records for this name.
 		 */
 		qctx->client->query.dns64_ttl = qctx->rdataset->ttl;
-		SAVE(qctx->client->query.dns64_aaaa, qctx->rdataset);
-		SAVE(qctx->client->query.dns64_sigaaaa, qctx->sigrdataset);
+		qctx->client->query.dns64_aaaa = MOVE_OWNERSHIP(qctx->rdataset);
+		qctx->client->query.dns64_sigaaaa =
+			MOVE_OWNERSHIP(qctx->sigrdataset);
 		ns_client_releasename(qctx->client, &qctx->fname);
 		dns_db_detachnode(&qctx->node);
 		qctx->type = qctx->qtype = dns_rdatatype_a;
@@ -8505,10 +8481,9 @@ query_zone_delegation(query_ctx_t *qctx) {
 				dns_zone_detach(&qctx->zone);
 				qctx->zhooks = NULL;
 			}
-			qctx->version = NULL;
-			RESTORE(qctx->version, tversion);
-			RESTORE(qctx->db, tdb);
-			RESTORE(qctx->zone, tzone);
+			qctx->version = MOVE_OWNERSHIP(tversion);
+			qctx->db = MOVE_OWNERSHIP(tdb);
+			qctx->zone = MOVE_OWNERSHIP(tzone);
 			qctx->authoritative = true;
 
 			return query_lookup(qctx);
@@ -8530,12 +8505,12 @@ query_zone_delegation(query_ctx_t *qctx) {
 		 * we'll restore these values there.
 		 */
 		ns_client_keepname(qctx->client, qctx->fname, qctx->dbuf);
-		SAVE(qctx->zdb, qctx->db);
-		SAVE(qctx->znode, qctx->node);
-		SAVE(qctx->zfname, qctx->fname);
-		SAVE(qctx->zversion, qctx->version);
-		SAVE(qctx->zrdataset, qctx->rdataset);
-		SAVE(qctx->zsigrdataset, qctx->sigrdataset);
+		qctx->zdb = MOVE_OWNERSHIP(qctx->db);
+		qctx->znode = MOVE_OWNERSHIP(qctx->node);
+		qctx->zfname = MOVE_OWNERSHIP(qctx->fname);
+		qctx->zversion = MOVE_OWNERSHIP(qctx->version);
+		qctx->zrdataset = MOVE_OWNERSHIP(qctx->rdataset);
+		qctx->zsigrdataset = MOVE_OWNERSHIP(qctx->sigrdataset);
 		dns_db_attach(qctx->view->cachedb, &qctx->db);
 		qctx->is_zone = false;
 
@@ -8623,12 +8598,12 @@ query_delegation(query_ctx_t *qctx) {
 
 		dns_db_detachnode(&qctx->node);
 		dns_db_detach(&qctx->db);
-		RESTORE(qctx->db, qctx->zdb);
-		RESTORE(qctx->node, qctx->znode);
-		RESTORE(qctx->fname, qctx->zfname);
-		RESTORE(qctx->version, qctx->zversion);
-		RESTORE(qctx->rdataset, qctx->zrdataset);
-		RESTORE(qctx->sigrdataset, qctx->zsigrdataset);
+		qctx->db = MOVE_OWNERSHIP(qctx->zdb);
+		qctx->node = MOVE_OWNERSHIP(qctx->znode);
+		qctx->fname = MOVE_OWNERSHIP(qctx->zfname);
+		qctx->version = MOVE_OWNERSHIP(qctx->zversion);
+		qctx->rdataset = MOVE_OWNERSHIP(qctx->zrdataset);
+		qctx->sigrdataset = MOVE_OWNERSHIP(qctx->zsigrdataset);
 	}
 
 	result = query_delegation_recurse(qctx);
@@ -8872,8 +8847,9 @@ query_nodata(query_ctx_t *qctx, isc_result_t res) {
 		if (qctx->sigrdataset != NULL) {
 			ns_client_putrdataset(qctx->client, &qctx->sigrdataset);
 		}
-		RESTORE(qctx->rdataset, qctx->client->query.dns64_aaaa);
-		RESTORE(qctx->sigrdataset, qctx->client->query.dns64_sigaaaa);
+		qctx->rdataset = MOVE_OWNERSHIP(qctx->client->query.dns64_aaaa);
+		qctx->sigrdataset =
+			MOVE_OWNERSHIP(qctx->client->query.dns64_sigaaaa);
 		if (qctx->fname == NULL) {
 			qctx->dbuf = ns_client_getnamebuf(qctx->client);
 			qctx->fname = ns_client_newname(qctx->client,
@@ -8923,8 +8899,9 @@ query_nodata(query_ctx_t *qctx, isc_result_t res) {
 			UNREACHABLE();
 		}
 
-		SAVE(qctx->client->query.dns64_aaaa, qctx->rdataset);
-		SAVE(qctx->client->query.dns64_sigaaaa, qctx->sigrdataset);
+		qctx->client->query.dns64_aaaa = MOVE_OWNERSHIP(qctx->rdataset);
+		qctx->client->query.dns64_sigaaaa =
+			MOVE_OWNERSHIP(qctx->sigrdataset);
 		ns_client_releasename(qctx->client, &qctx->fname);
 		dns_db_detachnode(&qctx->node);
 		qctx->type = qctx->qtype = dns_rdatatype_a;
@@ -9270,14 +9247,15 @@ query_redirect(query_ctx_t *qctx, isc_result_t saved_result) {
 	case DNS_R_CONTINUE:
 		inc_stats(qctx->client,
 			  ns_statscounter_nxdomainredirect_rlookup);
-		SAVE(qctx->client->query.redirect.db, qctx->db);
-		SAVE(qctx->client->query.redirect.node, qctx->node);
-		SAVE(qctx->client->query.redirect.zone, qctx->zone);
+		qctx->client->query.redirect.db = MOVE_OWNERSHIP(qctx->db);
+		qctx->client->query.redirect.node = MOVE_OWNERSHIP(qctx->node);
+		qctx->client->query.redirect.zone = MOVE_OWNERSHIP(qctx->zone);
 		qctx->client->query.redirect.qtype = qctx->qtype;
 		INSIST(qctx->rdataset != NULL);
-		SAVE(qctx->client->query.redirect.rdataset, qctx->rdataset);
-		SAVE(qctx->client->query.redirect.sigrdataset,
-		     qctx->sigrdataset);
+		qctx->client->query.redirect.rdataset =
+			MOVE_OWNERSHIP(qctx->rdataset);
+		qctx->client->query.redirect.sigrdataset =
+			MOVE_OWNERSHIP(qctx->sigrdataset);
 		qctx->client->query.redirect.result = saved_result;
 		dns_name_copy(qctx->fname, qctx->client->query.redirect.fname);
 		qctx->client->query.redirect.authoritative =
@@ -10679,10 +10657,10 @@ db_find:
 		if (USECACHE(client)) {
 			ns_client_keepname(client, fname, dbuf);
 			dns_db_detachnode(&node);
-			SAVE(zdb, db);
-			SAVE(zfname, fname);
-			SAVE(zrdataset, rdataset);
-			SAVE(zsigrdataset, sigrdataset);
+			zdb = MOVE_OWNERSHIP(db);
+			zfname = MOVE_OWNERSHIP(fname);
+			zrdataset = MOVE_OWNERSHIP(rdataset);
+			zsigrdataset = MOVE_OWNERSHIP(sigrdataset);
 			version = NULL;
 			dns_db_attach(client->inner.view->cachedb, &db);
 			is_zone = false;
@@ -10733,10 +10711,10 @@ db_find:
 		}
 		dns_db_detach(&db);
 
-		RESTORE(db, zdb);
-		RESTORE(fname, zfname);
-		RESTORE(rdataset, zrdataset);
-		RESTORE(sigrdataset, zsigrdataset);
+		db = MOVE_OWNERSHIP(zdb);
+		fname = MOVE_OWNERSHIP(zfname);
+		rdataset = MOVE_OWNERSHIP(zrdataset);
+		sigrdataset = MOVE_OWNERSHIP(zsigrdataset);
 	}
 
 	/*
