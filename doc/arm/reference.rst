@@ -2054,21 +2054,19 @@ Boolean Options
    :any:`minimal-responses` takes one of four values:
 
    -  ``no``: the server is as complete as possible when generating
-      responses.
+      responses from authoritative zones. (Authority records are not
+      added when answering from the cache.)
    -  ``yes``: the server only adds records to the authority and additional
       sections when such records are required by the DNS protocol (for
       example, when returning delegations or negative responses). This
       provides the best server performance but may result in more client
       queries.
-   -  ``no-auth``: the server omits records from the authority section except
-      when they are required, but it may still add records to the
-      additional section.
-   -  ``no-auth-recursive``: the same as ``no-auth`` when recursion is requested
+   -  ``no-auth``: is a deprecated alias of ``yes``.
+   -  ``no-auth-recursive``: the same as ``yes`` when recursion is requested
       in the query (RD=1), or the same as ``no`` if recursion is not requested.
 
-   ``no-auth`` and ``no-auth-recursive`` are useful when answering stub
-   clients, which usually ignore the authority section.
-   ``no-auth-recursive`` is meant for use in mixed-mode servers that
+   ``no-auth-recursive`` is useful when answering stub clients, which usually
+   ignore the authority section. It is meant for use in mixed-mode servers that
    handle both authoritative and recursive queries.
 
    The default is ``no-auth-recursive``.
@@ -3834,9 +3832,12 @@ system.
      - 2 MB for views with :any:`recursion` set to ``no``.
 
    Any positive value smaller than 2 MB is ignored and reset to 2 MB.
-   The keyword ``unlimited``, or the value ``0``, places no limit on the
-   cache size; records are then purged from the cache only when they
-   expire (according to their TTLs).
+
+   .. warning::
+
+       Previously, the keyword ``unlimited``, or the value ``0``, placed
+       no limit on the cache size; this is no longer permitted as
+       TTL-based cleaning has been removed from :iscman:`named`.
 
    .. note::
 
@@ -3846,10 +3847,11 @@ system.
        default value of that option (90% of physical memory for each
        individual cache) may lead to memory exhaustion over time.
 
-   .. note::
+   .. warning::
 
-       :any:`max-cache-size` does not work reliably for a maximum
-       amount of memory of 100 MB or lower.
+       Setting :any:`max-cache-size` to a value lower than 256 MB is
+       permitted but not recommended; LRU-only cache eviction may cause
+       excessive churn under load.
 
    Upon startup and reconfiguration, caches with a limited size
    preallocate a small amount of memory (less than 1% of
@@ -3858,10 +3860,13 @@ system.
    internal cache structures.
 
    On systems where detection of the amount of physical memory is not
-   supported, percentage-based values fall back to ``unlimited``. Note
-   that the amount of physical memory available is only detected on
-   startup, so :iscman:`named` does not adjust the cache size limits if the
-   amount of physical memory is changed at runtime.
+   supported, :iscman:`named` will fall back to the minimum value (2 MB).
+
+   .. note::
+
+       The amount of physical memory available is only detected on startup, so
+       :iscman:`named` does not adjust the cache size limits if the amount of
+       physical memory is changed at runtime.
 
    On Linux, the system administrator can use `cgroup`_ (Control Group)
    mechanism to limit the amount of available memory to the process.  This limit

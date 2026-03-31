@@ -178,6 +178,9 @@ typedef ISC_LIST(dns_zone_t) dns_zonelist_t;
 typedef struct dns_zonemgr   dns_zonemgr_t;
 typedef struct dns_zt	     dns_zt_t;
 typedef struct dns_ipkeylist dns_ipkeylist_t;
+typedef struct dns_deleg     dns_deleg_t;
+typedef ISC_LIST(dns_deleg_t) dns_deleglist_t;
+typedef struct dns_delegset dns_delegset_t;
 
 typedef struct dst_gssapi_signverifyctx dst_gssapi_signverifyctx_t;
 
@@ -246,8 +249,7 @@ typedef enum {
 
 typedef enum {
 	dns_expire_lru = 0,
-	dns_expire_ttl = 1,
-	dns_expire_flush = 2,
+	dns_expire_flush = 1,
 } dns_expire_t;
 
 /*

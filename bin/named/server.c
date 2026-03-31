@@ -18,13 +18,12 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-#include <dns/acl.h>
 
 #ifdef HAVE_DNSTAP
 #include <fstrm.h>
@@ -60,6 +59,7 @@
 #include <isc/timer.h>
 #include <isc/util.h>
 
+#include <dns/acl.h>
 #include <dns/adb.h>
 #include <dns/badcache.h>
 #include <dns/cache.h>
@@ -119,6 +119,7 @@
 
 #include <named/config.h>
 #include <named/control.h>
+#include <named/globals.h>
 #include <named/nzd.h>
 #if defined(HAVE_GEOIP2)
 #include <named/geoip.h>
@@ -151,10 +152,6 @@
 #ifndef SIZE_MAX
 #define SIZE_MAX ((size_t)(-1))
 #endif /* ifndef SIZE_MAX */
-
-#ifndef SIZE_AS_PERCENT
-#define SIZE_AS_PERCENT ((size_t)(-2))
-#endif /* ifndef SIZE_AS_PERCENT */
 
 /* RFC7828 defines timeout as 16-bit value specified in units of 100
  * milliseconds, so the maximum and minimum advertised and keepalive
@@ -244,6 +241,7 @@ struct dumpcontext {
 	isc_mem_t *mctx;
 	bool dumpcache;
 	bool dumpzones;
+	bool dumpdeleg;
 	bool dumpadb;
 	bool dumpexpired;
 	bool dumpfail;
@@ -3574,6 +3572,113 @@ named_register_one_plugin(const cfg_obj_t *config, const cfg_obj_t *obj,
 	return result;
 }
 
+static size_t
+sanitized_max_cache_size(const cfg_obj_t *obj, uint64_t value);
+
+static size_t
+max_cache_size_as_percent(const cfg_obj_t *obj, uint32_t percent) {
+	uint64_t totalphys = isc_meminfo_totalphys();
+
+	if (totalphys == 0) {
+		cfg_obj_log(obj, ISC_LOG_ERROR,
+			    "Unable to determine amount of physical "
+			    "memory, setting 'max-cache-size' to the "
+			    "minimum value");
+		return DNS_CACHE_MINSIZE;
+	}
+
+	uint64_t max_cache_size = totalphys * percent / 100;
+
+	cfg_obj_log(obj, ISC_LOG_INFO,
+		    "'max-cache-size %d%%' "
+		    "- setting to %" PRIu64 "MB "
+		    "(out of %" PRIu64 "MB)",
+		    percent, (uint64_t)(max_cache_size / (1024 * 1024)),
+		    totalphys / (1024 * 1024));
+
+	return sanitized_max_cache_size(obj, max_cache_size);
+}
+
+static size_t
+default_max_cache_size(const dns_view_t *view, const cfg_obj_t *obj) {
+	if (view->recursion) {
+		return max_cache_size_as_percent(obj, 90);
+	} else {
+		return DNS_CACHE_MINSIZE;
+	}
+}
+
+static size_t
+sanitized_max_cache_size(const cfg_obj_t *obj, uint64_t value) {
+	if (value > SIZE_MAX) {
+		cfg_obj_log(obj, ISC_LOG_WARNING,
+			    "'max-cache-size %" PRIu64 "' "
+			    "is too large for this system; reducing to %lu",
+			    value, (unsigned long)SIZE_MAX);
+		return SIZE_MAX;
+	}
+
+	if (value < DNS_CACHE_MINSIZE) {
+		cfg_obj_log(obj, ISC_LOG_WARNING,
+			    "'max-cache-size %" PRIu64 "' "
+			    "is too small; setting to %" PRIu64,
+			    value, DNS_CACHE_MINSIZE);
+		return DNS_CACHE_MINSIZE;
+	}
+
+	return value;
+}
+
+static size_t
+configure_max_cache_size(dns_view_t *view, const cfg_obj_t *maps[4]) {
+	isc_result_t result;
+	const cfg_obj_t *obj = NULL;
+	const char *str = NULL;
+
+	if (named_g_maxcachesize != 0) {
+		/*
+		 * If "-T maxcachesize=..." is in effect, it overrides any
+		 * other "max-cache-size" setting found in configuration,
+		 * either implicit or explicit.  For simplicity, the value
+		 * passed to that command line option is always treated as
+		 * the number of bytes to set "max-cache-size" to.
+		 */
+		return named_g_maxcachesize;
+	}
+
+	obj = NULL;
+	result = named_config_get(maps, "max-cache-size", &obj);
+	INSIST(result == ISC_R_SUCCESS);
+	if (cfg_obj_isstring(obj) &&
+	    strcasecmp(cfg_obj_asstring(obj), "default") == 0)
+	{
+		/*
+		 * The default for a view with recursion
+		 * is 90% of memory. With no recursion,
+		 * it's the minimum cache size allowed by
+		 * dns_cache_setcachesize().
+		 */
+		return default_max_cache_size(view, obj);
+	} else if (cfg_obj_isstring(obj)) {
+		str = cfg_obj_asstring(obj);
+		INSIST(strcasecmp(str, "unlimited") == 0);
+
+		cfg_obj_log(obj, ISC_LOG_WARNING,
+			    "'max-cache-size' can't be unlimited; "
+			    "falling back to default");
+
+		return default_max_cache_size(view, obj);
+	} else if (cfg_obj_ispercentage(obj)) {
+		return max_cache_size_as_percent(obj,
+						 cfg_obj_aspercentage(obj));
+	} else if (cfg_obj_isuint64(obj)) {
+		uint64_t value = cfg_obj_asuint64(obj);
+		return sanitized_max_cache_size(obj, value);
+	} else {
+		UNREACHABLE();
+	}
+}
+
 static const char *const response_synonyms[] = { "response", NULL };
 
 /*
@@ -3612,7 +3717,6 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	dns_cache_t *cache = NULL;
 	isc_result_t result;
 	size_t max_cache_size;
-	uint32_t max_cache_size_percent = 0;
 	size_t max_adb_size;
 	uint32_t lame_ttl, fail_ttl;
 	uint32_t max_stale_ttl = 0;
@@ -3819,78 +3923,14 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	INSIST(result == ISC_R_SUCCESS);
 	view->recursion = cfg_obj_asboolean(obj);
 
-	if (named_g_maxcachesize != 0) {
-		/*
-		 * If "-T maxcachesize=..." is in effect, it overrides any
-		 * other "max-cache-size" setting found in configuration,
-		 * either implicit or explicit.  For simplicity, the value
-		 * passed to that command line option is always treated as
-		 * the number of bytes to set "max-cache-size" to.
-		 */
-		max_cache_size = named_g_maxcachesize;
-	} else {
-		obj = NULL;
-		result = named_config_get(maps, "max-cache-size", &obj);
-		INSIST(result == ISC_R_SUCCESS);
-		if (cfg_obj_isstring(obj) &&
-		    strcasecmp(cfg_obj_asstring(obj), "default") == 0)
-		{
-			/*
-			 * The default for a view with recursion
-			 * is 90% of memory. With no recursion,
-			 * it's the minimum cache size allowed by
-			 * dns_cache_setcachesize().
-			 */
-			if (view->recursion) {
-				max_cache_size = SIZE_AS_PERCENT;
-				max_cache_size_percent = 90;
-			} else {
-				max_cache_size = 1;
-			}
-		} else if (cfg_obj_isstring(obj)) {
-			str = cfg_obj_asstring(obj);
-			INSIST(strcasecmp(str, "unlimited") == 0);
-			max_cache_size = 0;
-		} else if (cfg_obj_ispercentage(obj)) {
-			max_cache_size = SIZE_AS_PERCENT;
-			max_cache_size_percent = cfg_obj_aspercentage(obj);
-		} else if (cfg_obj_isuint64(obj)) {
-			uint64_t value = cfg_obj_asuint64(obj);
-			if (value > SIZE_MAX) {
-				cfg_obj_log(obj, ISC_LOG_WARNING,
-					    "'max-cache-size "
-					    "%" PRIu64 "' "
-					    "is too large for this "
-					    "system; reducing to %lu",
-					    value, (unsigned long)SIZE_MAX);
-				value = SIZE_MAX;
-			}
-			max_cache_size = (size_t)value;
-		} else {
-			UNREACHABLE();
-		}
-	}
+	max_cache_size = configure_max_cache_size(view, maps);
 
-	if (max_cache_size == SIZE_AS_PERCENT) {
-		uint64_t totalphys = isc_meminfo_totalphys();
-
-		max_cache_size =
-			(size_t)(totalphys * max_cache_size_percent / 100);
-		if (totalphys == 0) {
-			cfg_obj_log(obj, ISC_LOG_WARNING,
-				    "Unable to determine amount of physical "
-				    "memory, setting 'max-cache-size' to "
-				    "unlimited");
-		} else {
-			cfg_obj_log(obj, ISC_LOG_INFO,
-				    "'max-cache-size %d%%' "
-				    "- setting to %" PRIu64 "MB "
-				    "(out of %" PRIu64 "MB)",
-				    max_cache_size_percent,
-				    (uint64_t)(max_cache_size / (1024 * 1024)),
-				    totalphys / (1024 * 1024));
-		}
-	}
+	/*
+	 * Since both the delegation DB and ADB uses 1/8 of the
+	 * `max_cache_size`, let's use 6/8 for the main cache DB.
+	 */
+	const size_t cache_size_slice = max_cache_size / 8;
+	const size_t main_cache_size = cache_size_slice * 6;
 
 	/* Check-names. */
 	obj = NULL;
@@ -4128,6 +4168,12 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	INSIST(result == ISC_R_SUCCESS);
 	stale_refresh_time = cfg_obj_asduration(obj);
 
+	result = dns_viewlist_find(&named_g_server->viewlist, view->name,
+				   view->rdclass, &pview);
+	if (result != ISC_R_NOTFOUND && result != ISC_R_SUCCESS) {
+		goto cleanup;
+	}
+
 	/*
 	 * Configure the view's cache.
 	 *
@@ -4171,7 +4217,7 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	}
 	if (nsc != NULL) {
 		if (!cache_sharable(nsc->primaryview, view, zero_no_soattl,
-				    max_cache_size, max_stale_ttl,
+				    main_cache_size, max_stale_ttl,
 				    stale_refresh_time))
 		{
 			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
@@ -4193,11 +4239,6 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 			}
 		}
 	} else if (strcmp(cachename, view->name) == 0) {
-		result = dns_viewlist_find(&named_g_server->viewlist, cachename,
-					   view->rdclass, &pview);
-		if (result != ISC_R_NOTFOUND && result != ISC_R_SUCCESS) {
-			goto cleanup;
-		}
 		if (pview != NULL) {
 			if (!cache_reusable(pview, view, zero_no_soattl)) {
 				isc_log_write(NAMED_LOGCATEGORY_GENERAL,
@@ -4222,7 +4263,6 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 			dns_resolver_getqueryrttstats(pview->resolver,
 						      &resqueryinrttstats,
 						      &resqueryoutrttstats);
-			dns_view_detach(&pview);
 		}
 	}
 
@@ -4253,7 +4293,7 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 
 	dns_view_setcache(view, cache, shared_cache);
 
-	dns_cache_setcachesize(cache, max_cache_size);
+	dns_cache_setcachesize(cache, main_cache_size);
 	dns_cache_setservestalettl(cache, max_stale_ttl);
 	dns_cache_setservestalerefresh(cache, stale_refresh_time);
 
@@ -4277,6 +4317,24 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 
 	CHECK(dns_view_createresolver(view, resopts, tlsctx_client_cache,
 				      dispatch4, dispatch6));
+
+	/*
+	 * The deleg DB cache is preserved if reconfiguring/reloading the
+	 * server.
+	 */
+	if (pview != NULL) {
+		dns_delegdb_reuse(pview, view);
+	} else {
+		dns_delegdb_create(&view->deleg);
+	}
+	dns_delegdb_setsize(view->deleg, cache_size_slice);
+
+	/*
+	 * The previous view isn't needed anymore.
+	 */
+	if (pview != NULL) {
+		dns_view_detach(&pview);
+	}
 
 	if (resstats == NULL) {
 		isc_stats_create(mctx, &resstats, dns_resstatscounter_max);
@@ -4303,25 +4361,21 @@ configure_view(dns_view_t *view, dns_viewlist_t *viewlist, cfg_obj_t *config,
 	 * Set the ADB cache size to 1/8th of the max-cache-size or
 	 * MAX_ADB_SIZE_FOR_CACHESHARE when the cache is shared.
 	 */
-	max_adb_size = 0;
-	if (max_cache_size != 0U) {
-		max_adb_size = max_cache_size / 8;
-		if (max_adb_size == 0U) {
-			max_adb_size = 1; /* Force minimum. */
-		}
-		if (view != nsc->primaryview &&
-		    max_adb_size > MAX_ADB_SIZE_FOR_CACHESHARE)
-		{
-			max_adb_size = MAX_ADB_SIZE_FOR_CACHESHARE;
-			if (!nsc->adbsizeadjusted) {
-				dns_view_getadb(nsc->primaryview, &adb);
-				if (adb != NULL) {
-					dns_adb_setadbsize(
-						adb,
-						MAX_ADB_SIZE_FOR_CACHESHARE);
-					nsc->adbsizeadjusted = true;
-					dns_adb_detach(&adb);
-				}
+	max_adb_size = cache_size_slice;
+	if (max_adb_size < DNS_ADB_MINADBSIZE) {
+		max_adb_size = DNS_ADB_MINADBSIZE; /* Force minimum. */
+	}
+	if (view != nsc->primaryview &&
+	    max_adb_size > MAX_ADB_SIZE_FOR_CACHESHARE)
+	{
+		max_adb_size = MAX_ADB_SIZE_FOR_CACHESHARE;
+		if (!nsc->adbsizeadjusted) {
+			dns_view_getadb(nsc->primaryview, &adb);
+			if (adb != NULL) {
+				dns_adb_setadbsize(adb,
+						   MAX_ADB_SIZE_FOR_CACHESHARE);
+				nsc->adbsizeadjusted = true;
+				dns_adb_detach(&adb);
 			}
 		}
 	}
@@ -6542,7 +6596,7 @@ tat_send(void *arg) {
 	char namebuf[DNS_NAME_FORMATSIZE];
 	dns_fixedname_t fdomain;
 	dns_name_t *domain = NULL;
-	dns_rdataset_t nameservers;
+	dns_delegset_t *delegset = NULL;
 	isc_result_t result;
 	dns_name_t *keyname = NULL;
 	dns_name_t *tatname = NULL;
@@ -6574,25 +6628,23 @@ tat_send(void *arg) {
 	 * to.
 	 *
 	 * After the dns_view_findzonecut() call, 'domain' will hold the
-	 * deepest zone cut we can find for 'keyname' while 'nameservers' will
-	 * hold the NS RRset at that zone cut.
+	 * deepest zone cut we can find for 'keyname' while 'delegset' will
+	 * hold the NS names at that zone cut.
 	 */
 	domain = dns_fixedname_initname(&fdomain);
-	dns_rdataset_init(&nameservers);
 	result = dns_view_bestzonecut(tat->view, keyname, domain, NULL, 0, 0,
-				      true, true, &nameservers);
+				      true, true, &delegset);
 	if (result == ISC_R_SUCCESS) {
 		result = dns_resolver_createfetch(
 			tat->view->resolver, tatname, dns_rdatatype_null,
-			domain, &nameservers, NULL, NULL, 0, 0, 0, NULL, NULL,
-			NULL, tat->loop, tat_done, tat, NULL, &tat->rdataset,
+			domain, delegset, NULL, NULL, 0, 0, 0, NULL, NULL, NULL,
+			tat->loop, tat_done, tat, NULL, &tat->rdataset,
 			&tat->sigrdataset, &tat->fetch);
 
 		/*
-		 * dns_resolver_createfetch() will create its own copy of
-		 * nameservers.
+		 * dns_resolver_createfetch() will internally attach delegset.
 		 */
-		dns_rdataset_cleanup(&nameservers);
+		dns_delegset_detach(&delegset);
 	}
 
 	/*
@@ -10759,6 +10811,12 @@ resume:
 		dns_db_attach(dctx->view->view->cachedb, &dctx->cache);
 	}
 
+	if (dctx->dumpdeleg) {
+		fprintf(dctx->fp, ";\n; Delegation cache\n;\n");
+		dns_delegdb_dump(dctx->view->view->deleg, dctx->dumpexpired,
+				 dctx->fp);
+	}
+
 	if (dctx->cache != NULL) {
 		if (dctx->dumpadb) {
 			dns_adb_t *adb = NULL;
@@ -10774,6 +10832,7 @@ resume:
 		}
 		dns_db_detach(&dctx->cache);
 	}
+
 	if (dctx->dumpzones) {
 		style = &dns_master_style_full;
 	nextzone:
@@ -10862,6 +10921,7 @@ named_server_dumpdb(named_server_t *server, isc_lex_t *lex,
 		.mctx = server->mctx,
 		.dumpcache = true,
 		.dumpadb = true,
+		.dumpdeleg = true,
 		.dumpfail = true,
 		.viewlist = ISC_LIST_INITIALIZER,
 	};
@@ -10890,23 +10950,33 @@ named_server_dumpdb(named_server_t *server, isc_lex_t *lex,
 		/* only dump zones, suppress caches */
 		dctx->dumpadb = false;
 		dctx->dumpcache = false;
+		dctx->dumpdeleg = false;
 		dctx->dumpfail = false;
 		dctx->dumpzones = true;
+		ptr = next_token(lex, NULL);
+	} else if (ptr != NULL && strcmp(ptr, "-deleg") == 0) {
+		/* only dump deleg db, suppress other caches */
+		dctx->dumpcache = false;
+		dctx->dumpfail = false;
+		dctx->dumpadb = false;
 		ptr = next_token(lex, NULL);
 	} else if (ptr != NULL && strcmp(ptr, "-adb") == 0) {
 		/* only dump adb, suppress other caches */
 		dctx->dumpcache = false;
+		dctx->dumpdeleg = false;
 		dctx->dumpfail = false;
 		ptr = next_token(lex, NULL);
 	} else if (ptr != NULL && strcmp(ptr, "-bad") == 0) {
 		/* only dump badcache, suppress other caches */
 		dctx->dumpadb = false;
+		dctx->dumpdeleg = false;
 		dctx->dumpcache = false;
 		dctx->dumpfail = false;
 		ptr = next_token(lex, NULL);
 	} else if (ptr != NULL && strcmp(ptr, "-fail") == 0) {
 		/* only dump servfail cache, suppress other caches */
 		dctx->dumpadb = false;
+		dctx->dumpdeleg = false;
 		dctx->dumpcache = false;
 		ptr = next_token(lex, NULL);
 	}
@@ -11207,6 +11277,13 @@ cleanup:
 	return result;
 }
 
+static void
+flush_delegdb(dns_view_t *view) {
+	dns_delegdb_shutdown(view->deleg);
+	dns_delegdb_detach(&view->deleg);
+	dns_delegdb_create(&view->deleg);
+}
+
 isc_result_t
 named_server_flushcache(named_server_t *server, isc_lex_t *lex) {
 	char *ptr = NULL;
@@ -11284,6 +11361,8 @@ named_server_flushcache(named_server_t *server, isc_lex_t *lex) {
 	 * two views.  Then this will be a O(n^2/4) operation.
 	 */
 	ISC_LIST_FOREACH(server->viewlist, view, link) {
+		flush_delegdb(view);
+
 		if (!dns_view_iscacheshared(view)) {
 			continue;
 		}
@@ -11338,11 +11417,73 @@ named_server_flushcache(named_server_t *server, isc_lex_t *lex) {
 	return result;
 }
 
+static bool
+flushnode_cache(dns_view_t *view, const dns_name_t *name, const char *target,
+		bool tree) {
+	isc_result_t result;
+
+	/*
+	 * It's a little inefficient to try flushing name for all views
+	 * if some of the views share a single cache.  But since the
+	 * operation is lightweight we prefer simplicity here.
+	 */
+	result = dns_view_flushnode(view, name, tree);
+	if (result != ISC_R_SUCCESS) {
+		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+			      ISC_LOG_ERROR,
+			      "flushing %s '%s' in cache view '%s' "
+			      "failed: %s",
+			      tree ? "tree" : "name", target, view->name,
+			      isc_result_totext(result));
+	}
+
+	return result == ISC_R_SUCCESS;
+}
+
+static bool
+flushnode_delegcache(dns_view_t *view, const dns_name_t *name,
+		     const char *target, bool tree) {
+	isc_result_t result;
+
+	result = dns_delegdb_delete(view->deleg, name, tree);
+	if (result != ISC_R_SUCCESS) {
+		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+			      ISC_LOG_ERROR,
+			      "flushing %s '%s' in delegation cache view '%s' "
+			      "failed: %s",
+			      tree ? "tree" : "name", target, view->name,
+			      isc_result_totext(result));
+	}
+
+	return result == ISC_R_SUCCESS;
+}
+
+static void
+logflushcachesuccess(const char *viewname, const char *target, bool tree,
+		     bool deleg) {
+	const char *cache =
+		deleg ? (viewname == NULL ? "delegation cache for all views"
+					  : "delegation cache for view")
+		      : (viewname == NULL ? "DNS cache for all views"
+					  : "DNS cache for view");
+
+	if (viewname == NULL) {
+		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+			      ISC_LOG_INFO, "flushing %s '%s' in %s succeeded",
+			      tree ? "tree" : "name", target, cache);
+	} else {
+		isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_SERVER,
+			      ISC_LOG_INFO,
+			      "flushing %s '%s' in %s %s succeeded",
+			      tree ? "tree" : "name", target, cache, viewname);
+	}
+}
+
 isc_result_t
 named_server_flushnode(named_server_t *server, isc_lex_t *lex, bool tree) {
 	char *ptr = NULL, *viewname = NULL;
 	char target[DNS_NAME_FORMATSIZE];
-	bool flushed;
+	bool flushedcache = false, flusheddelegcache = false;
 	bool found;
 	isc_result_t result = ISC_R_SUCCESS;
 	isc_buffer_t b;
@@ -11371,51 +11512,41 @@ named_server_flushnode(named_server_t *server, isc_lex_t *lex, bool tree) {
 	viewname = next_token(lex, NULL);
 
 	isc_loopmgr_pause();
-	flushed = true;
 	found = false;
 	ISC_LIST_FOREACH(server->viewlist, view, link) {
 		if (viewname != NULL && strcasecmp(viewname, view->name) != 0) {
 			continue;
 		}
+
 		found = true;
-		/*
-		 * It's a little inefficient to try flushing name for all views
-		 * if some of the views share a single cache.  But since the
-		 * operation is lightweight we prefer simplicity here.
-		 */
-		result = dns_view_flushnode(view, name, tree);
-		if (result != ISC_R_SUCCESS) {
-			flushed = false;
-			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
-				      NAMED_LOGMODULE_SERVER, ISC_LOG_ERROR,
-				      "flushing %s '%s' in cache view '%s' "
-				      "failed: %s",
-				      tree ? "tree" : "name", target,
-				      view->name, isc_result_totext(result));
+
+		if (flushnode_cache(view, name, target, tree)) {
+			flushedcache = true;
+		}
+
+		if (flushnode_delegcache(view, name, target, tree)) {
+			flusheddelegcache = true;
 		}
 	}
-	if (flushed && found) {
-		if (viewname != NULL) {
-			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
-				      NAMED_LOGMODULE_SERVER, ISC_LOG_INFO,
-				      "flushing %s '%s' in cache view '%s' "
-				      "succeeded",
-				      tree ? "tree" : "name", target, viewname);
-		} else {
-			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
-				      NAMED_LOGMODULE_SERVER, ISC_LOG_INFO,
-				      "flushing %s '%s' in all cache views "
-				      "succeeded",
-				      tree ? "tree" : "name", target);
-		}
+
+	if (flushedcache && found) {
+		logflushcachesuccess(viewname, target, tree, false);
 		result = ISC_R_SUCCESS;
-	} else {
+	}
+
+	if (flusheddelegcache && found) {
+		logflushcachesuccess(viewname, target, tree, true);
+		result = ISC_R_SUCCESS;
+	}
+
+	if (!flushedcache && !flusheddelegcache) {
 		if (!found) {
-			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
-				      NAMED_LOGMODULE_SERVER, ISC_LOG_ERROR,
-				      "flushing %s '%s' in cache view '%s' "
-				      "failed: view not found",
-				      tree ? "tree" : "name", target, viewname);
+			isc_log_write(
+				NAMED_LOGCATEGORY_GENERAL,
+				NAMED_LOGMODULE_SERVER, ISC_LOG_ERROR,
+				"flushing %s '%s' in caches for view '%s' "
+				"failed: view not found",
+				tree ? "tree" : "name", target, viewname);
 		}
 		result = ISC_R_FAILURE;
 	}
