@@ -12,7 +12,7 @@
 project(
     'bind',
     ['c'],
-    version: '9.21.21-dev',
+    version: '9.21.22-dev',
     meson_version: '>=1.3.0',
     license: 'MPL-2.0',
     default_options: {
@@ -538,6 +538,7 @@ foreach h : [
     'regex.h',
     'stdckdint.h',
     'sys/mman.h',
+    'sys/endian.h',
     'sys/select.h',
     'sys/sockio.h',
     'sys/sysctl.h',
