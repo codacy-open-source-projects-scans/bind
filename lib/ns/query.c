@@ -66,6 +66,7 @@
 #include <dns/types.h>
 #include <dns/view.h>
 #include <dns/zone.h>
+#include <dns/zoneproperties.h>
 #include <dns/zt.h>
 
 #include <ns/client.h>
@@ -10777,9 +10778,6 @@ cleanup:
 		ns_client_putrdataset(client, &zrdataset);
 		if (zsigrdataset != NULL) {
 			ns_client_putrdataset(client, &zsigrdataset);
-		}
-		if (zfname != NULL) {
-			ns_client_releasename(client, &zfname);
 		}
 		dns_db_detach(&zdb);
 	}

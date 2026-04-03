@@ -103,6 +103,7 @@
 #include <dns/ttl.h>
 #include <dns/view.h>
 #include <dns/zone.h>
+#include <dns/zoneproperties.h>
 #include <dns/zt.h>
 
 #include <dst/dst.h>
@@ -6281,7 +6282,7 @@ configure_zone(const cfg_obj_t *config, const cfg_obj_t *zconfig,
 	if (inline_signing) {
 		dns_zone_getraw(zone, &raw);
 		if (raw == NULL) {
-			dns_zone_create(&raw, dns_zone_getmem(zone),
+			dns_zone_create(&raw, dns_zone_getmctx(zone),
 					dns_zone_gettid(zone));
 			dns_zone_setorigin(raw, origin);
 			dns_zone_setview(raw, view);
@@ -12189,16 +12190,13 @@ delete_zoneconf(dns_view_t *view, const cfg_obj_t *config,
 
 static isc_result_t
 do_addzone(named_server_t *server, dns_view_t *view, dns_name_t *name,
-	   cfg_obj_t *zoneconf, const cfg_obj_t *zoneobj, bool redirect,
-	   isc_buffer_t *text) {
+	   const cfg_obj_t *zoneobj, bool redirect, isc_buffer_t *text) {
 	isc_result_t result, tresult;
 	dns_zone_t *zone = NULL;
 	const cfg_obj_t *voptions = NULL;
 	bool locked = false;
 	MDB_txn *txn = NULL;
 	MDB_dbi dbi;
-
-	UNUSED(zoneconf);
 
 	if (!view->newzone.allowed) {
 		result = ISC_R_NOPERM;
@@ -12335,7 +12333,8 @@ do_modzone(named_server_t *server, dns_view_t *view, dns_name_t *name,
 	isc_result_t result, tresult;
 	dns_zone_t *zone = NULL;
 	const cfg_obj_t *voptions = NULL;
-	bool added;
+	const cfg_obj_t *options = NULL;
+	bool added, modded;
 	MDB_txn *txn = NULL;
 	MDB_dbi dbi;
 
@@ -12361,6 +12360,7 @@ do_modzone(named_server_t *server, dns_view_t *view, dns_name_t *name,
 	}
 
 	added = dns_zone_getadded(zone);
+	modded = dns_zone_getmodded(zone);
 	dns_zone_detach(&zone);
 
 	isc_loopmgr_pause();
@@ -12416,17 +12416,16 @@ do_modzone(named_server_t *server, dns_view_t *view, dns_name_t *name,
 		CHECK(dns_view_findzone(view, name, DNS_ZTFIND_EXACT, &zone));
 	}
 
-	if (!added) {
+	if (!added && !modded) {
 		if (view->newzone.vconfig == NULL) {
-			result = delete_zoneconf(view, server->effectiveconfig,
-						 dns_zone_getorigin(zone));
+			options = server->effectiveconfig;
 		} else {
-			voptions = cfg_tuple_get(server->effectiveconfig,
-						 "options");
-			result = delete_zoneconf(view, voptions,
-						 dns_zone_getorigin(zone));
+			options = cfg_tuple_get(server->effectiveconfig,
+						"options");
 		}
 
+		result = delete_zoneconf(view, options,
+					 dns_zone_getorigin(zone));
 		if (result != ISC_R_SUCCESS) {
 			TCHECK(putstr(text, "former zone configuration "
 					    "not deleted: "));
@@ -12478,11 +12477,16 @@ do_modzone(named_server_t *server, dns_view_t *view, dns_name_t *name,
 		TCHECK(putstr(text, zname));
 		TCHECK(putstr(text, "' reconfigured."));
 	} else {
+		CHECK(nzd_open(view, 0, &txn, &dbi));
+		CHECK(nzd_save(&txn, dbi, zone, zoneobj));
+
 		TCHECK(putstr(text, "zone '"));
 		TCHECK(putstr(text, zname));
 		TCHECK(putstr(text, "' must also be reconfigured in\n"));
 		TCHECK(putstr(text, "named.conf to make changes permanent."));
 	}
+
+	dns_zone_setmodded(zone, true);
 
 cleanup:
 	if (txn != NULL) {
@@ -12550,8 +12554,8 @@ named_server_changezone(named_server_t *server, char *command,
 	}
 
 	if (addzone) {
-		CHECK(do_addzone(server, view, dnsname, zoneconf, zoneobj,
-				 redirect, text));
+		CHECK(do_addzone(server, view, dnsname, zoneobj, redirect,
+				 text));
 	} else {
 		CHECK(do_modzone(server, view, dnsname, zonename, zoneobj,
 				 redirect, text));
@@ -12608,11 +12612,10 @@ static void
 rmzone(void *arg) {
 	ns_dzctx_t *dz = (ns_dzctx_t *)arg;
 	dns_zone_t *zone = NULL, *raw = NULL, *mayberaw = NULL;
-	dns_catz_zone_t *catz = NULL;
 	char zonename[DNS_NAME_FORMATSIZE];
 	dns_view_t *view = NULL;
 	dns_db_t *dbp = NULL;
-	bool added;
+	bool added, modded;
 	isc_result_t result;
 	MDB_txn *txn = NULL;
 	MDB_dbi dbi;
@@ -12633,11 +12636,11 @@ rmzone(void *arg) {
 	 * (If this is a catalog zone member then nzf_config can be NULL)
 	 */
 	added = dns_zone_getadded(zone);
-	catz = dns_zone_get_parentcatz(zone);
+	modded = dns_zone_getmodded(zone);
 
 	LOCK(&view->newzone.lock);
 
-	if (added && catz == NULL) {
+	if (added || modded) {
 		/* Make sure we can open the NZD database */
 		result = nzd_open(view, 0, &txn, &dbi);
 		if (result != ISC_R_SUCCESS) {
@@ -12662,17 +12665,17 @@ rmzone(void *arg) {
 	}
 
 	if (!added) {
+		const cfg_obj_t *voptions;
+
 		if (view->newzone.vconfig != NULL) {
-			const cfg_obj_t *voptions =
-				cfg_tuple_get(view->newzone.vconfig, "options");
-			result = delete_zoneconf(view, voptions,
-						 dns_zone_getorigin(zone));
+			voptions = cfg_tuple_get(view->newzone.vconfig,
+						 "options");
 		} else {
-			result = delete_zoneconf(view,
-						 dz->server->effectiveconfig,
-						 dns_zone_getorigin(zone));
+			voptions = dz->server->effectiveconfig;
 		}
 
+		result = delete_zoneconf(view, voptions,
+					 dns_zone_getorigin(zone));
 		if (result != ISC_R_SUCCESS) {
 			isc_log_write(NAMED_LOGCATEGORY_GENERAL,
 				      NAMED_LOGMODULE_SERVER, ISC_LOG_ERROR,
@@ -12993,8 +12996,9 @@ named_server_signing(named_server_t *server, isc_lex_t *lex,
 	bool resalt = false;
 	uint32_t serial = 0;
 	char keystr[DNS_SECALG_FORMATSIZE + 7]; /* <5-digit keyid>/<alg> */
-	unsigned short hash = 0, flags = 0, iter = 0, saltlen = 0;
-	unsigned char salt[255];
+	unsigned short hash = 0, flags = 0, iter = 0;
+	isc_region_t salt = { 0 };
+	unsigned char saltbuf[255];
 	const char *ptr;
 	size_t n;
 	bool kasp = false;
@@ -13078,14 +13082,15 @@ named_server_signing(named_server_t *server, isc_lex_t *lex,
 				 * 5155 (64 bits). It should be made
 				 * configurable.
 				 */
-				saltlen = 8;
+				salt.length = 8;
 				resalt = true;
 			} else if (strcmp(ptr, "-") != 0) {
 				isc_buffer_t buf;
 
-				isc_buffer_init(&buf, salt, sizeof(salt));
+				isc_buffer_init(&buf, saltbuf, sizeof(saltbuf));
 				CHECK(isc_hex_decodestring(ptr, &buf));
-				saltlen = isc_buffer_usedlength(&buf);
+				salt.base = saltbuf;
+				salt.length = isc_buffer_usedlength(&buf);
 			}
 		}
 	} else if (strcasecmp(ptr, "-serial") == 0) {
@@ -13113,9 +13118,9 @@ named_server_signing(named_server_t *server, isc_lex_t *lex,
 		(void)putstr(text, "request queued");
 		(void)putnull(text);
 	} else if (chain && !kasp) {
-		CHECK(dns_zone_setnsec3param(
-			zone, (uint8_t)hash, (uint8_t)flags, iter,
-			(uint8_t)saltlen, salt, true, resalt));
+		CHECK(dns_zone_setnsec3param(zone, (uint8_t)hash,
+					     (uint8_t)flags, iter, &salt, true,
+					     resalt));
 		(void)putstr(text, "nsec3param request queued");
 		(void)putnull(text);
 	} else if (setserial) {
