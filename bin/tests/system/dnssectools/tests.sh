@@ -21,20 +21,12 @@ n=1
 
 # check that a zone file is raw format, version 0
 israw0() {
-  # shellcheck disable=SC2016
-  $PERL <"$1" -e 'binmode STDIN;
-	             read(STDIN, $input, 8);
-	             ($style, $version) = unpack("NN", $input);
-	             exit 1 if ($style != 2 || $version != 0);' || return $?
+  test "$($PYTHON -m isctest.tools.rawzone version "$1")" = "0"
 }
 
 # check that a zone file is raw format, version 1
 israw1() {
-  # shellcheck disable=SC2016
-  $PERL <"$1" -e 'binmode STDIN;
-		     read(STDIN, $input, 8);
-                     ($style, $version) = unpack("NN", $input);
-                     exit 1 if ($style != 2 || $version != 1);' || return $?
+  test "$($PYTHON -m isctest.tools.rawzone version "$1")" = "1"
 }
 
 echo_i "basic dnssec-signzone checks:"
@@ -342,6 +334,33 @@ n=$((n + 1))
 test "$ret" -eq 0 || echo_i "failed"
 status=$((status + ret))
 
+echo_i "checking that a negative DNSKEY TTL is rejected ($n)"
+ret=0
+zone=example
+$KEYGEN -L -1 -a $DEFAULT_ALGORITHM $zone >dnssectools.out.test$n 2>&1 && ret=1
+grep -q "TTL must be non-negative" dnssectools.out.test$n || ret=1
+n=$((n + 1))
+test "$ret" -eq 0 || echo_i "failed"
+status=$((status + ret))
+
+echo_i "checking that an out-of-range DNSKEY TTL is rejected ($n)"
+ret=0
+zone=example
+$KEYGEN -L 9999999999 -a $DEFAULT_ALGORITHM $zone >dnssectools.out.test$n 2>&1 && ret=1
+grep -q "out of range" dnssectools.out.test$n || ret=1
+n=$((n + 1))
+test "$ret" -eq 0 || echo_i "failed"
+status=$((status + ret))
+
+echo_i "checking that a negative DNSKEY TTL with a unit suffix is rejected ($n)"
+ret=0
+zone=example
+$KEYGEN -L -1d -a $DEFAULT_ALGORITHM $zone >dnssectools.out.test$n 2>&1 && ret=1
+grep -q "TTL must be non-negative" dnssectools.out.test$n || ret=1
+n=$((n + 1))
+test "$ret" -eq 0 || echo_i "failed"
+status=$((status + ret))
+
 echo_i "checking that a DS record cannot be generated for a key using an unsupported algorithm ($n)"
 ret=0
 zone=example
@@ -371,21 +390,26 @@ n=$((n + 1))
 test "$ret" -eq 0 || echo_i "failed"
 status=$((status + ret))
 
-echo_i "checking that we can sign a zone with out-of-zone records ($n)"
 ret=0
+echo_i "checking that signing a zone with out-of-zone records fails ($n)"
 zone=example
 key1=$($KEYGEN -K signer -q -a $DEFAULT_ALGORITHM $zone)
 key2=$($KEYGEN -K signer -q -f KSK -a $DEFAULT_ALGORITHM $zone)
 (
   cd signer || exit 1
-  cat example.db.in "$key1.key" "$key2.key" >example.db
-  $SIGNER -o example -f example.db example.db >/dev/null
+  cat example.db.in "$key1.key" "$key2.key" >example.db || exit 1
+  echo "out-of-zone. 0 NSEC example. A" >>example.db || exit 1
 ) || ret=1
+# If dnssec-signzone fails, the test script will exit immediately.  Prevent
+# that from happening, and also trigger a test failure if dnssec-signzone
+# unexpectedly succeeds, by using "&& ret=1".
+$SIGNER -o example -f signer/example.db.signed signer/example.db >dnssectools.out.test$n 2>&1 && ret=1
+grep -q "out-of-zone data" dnssectools.out.test$n || ret=1
 n=$((n + 1))
 test "$ret" -eq 0 || echo_i "failed"
 status=$((status + ret))
 
-echo_i "checking that we can sign a zone (NSEC3) with out-of-zone records ($n)"
+echo_i "checking that we can sign a zone (NSEC3) ($n)"
 ret=0
 zone=example
 key1=$($KEYGEN -K signer -q -a $DEFAULT_ALGORITHM $zone)
@@ -647,8 +671,7 @@ ret=0
   cd signer || exit 1
   TZ=UTC $SIGNER -O full -f signer.out.9 -S -N date -o example example2.db >/dev/null
 ) || ret=1
-# shellcheck disable=SC2016
-now=$(TZ=UTC $PERL -e '@lt=localtime(); printf "%.4d%0.2d%0.2d00\n",$lt[5]+1900,$lt[4]+1,$lt[3];')
+now=$(date -u +%Y%m%d00)
 serial=$(awk '/^;/ { next; } $4 == "SOA" { print $7 }' signer/signer.out.9)
 [ "$now" -eq "$serial" ] || ret=1
 n=$((n + 1))
@@ -791,8 +814,8 @@ status=$((status + ret))
 
 echo_i "checking dnssec-signzone without -o and zone is in directory (incorrect basename) ($n)"
 ret=0
-cp signer/general/test13.db signer/bad.db
-$SIGNER -O full -S signer/bad.db 2>signer.err.$n && ret=1
+cp signer/general/test13.db signer/com
+$SIGNER -O full -S signer/com 2>signer.err.$n && ret=1
 grep "example.com: not at top of zone" signer.err.$n >/dev/null || ret=1
 n=$((n + 1))
 test "$ret" -eq 0 || echo_i "failed"
@@ -809,7 +832,8 @@ status=$((status + ret))
 
 echo_i "checking dnssec-verify without -o and zone is in directory (incorrect basename) ($n)"
 ret=0
-$VERIFY signer/example.com.signed 2>verify.err.$n && ret=1
+cp signer/example.com.signed signer/com
+$VERIFY signer/com 2>verify.err.$n && ret=1
 grep "example.com: not at top of zone" verify.err.$n >/dev/null || ret=1
 n=$((n + 1))
 test "$ret" -eq 0 || echo_i "failed"
@@ -1029,6 +1053,25 @@ ret=0
 zone=settagrange
 ksk=$("$KEYGEN" -f KSK -q -a $DEFAULT_ALGORITHM -M 0:32767 "$zone")
 zsk=$("$KEYGEN" -q -a $DEFAULT_ALGORITHM -M 32768:65535 "$zone")
+kid=$(keyfile_to_key_id "$ksk")
+zid=$(keyfile_to_key_id "$zsk")
+[ $kid -ge 0 -a $kid -le 32767 ] || ret=1
+[ $zid -ge 32768 -a $zid -le 65535 ] || ret=1
+rksk=$($REVOKE -R $ksk)
+rzsk=$($REVOKE -R $zsk)
+krid=$(keyfile_to_key_id "$rksk")
+zrid=$(keyfile_to_key_id "$rzsk")
+[ $krid -ge 0 -a $krid -le 32767 ] || ret=1
+[ $zrid -ge 32768 -a $zrid -le 65535 ] || ret=1
+n=$((n + 1))
+if [ "$ret" -ne 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+echo_i "check that dnssec-keygen honours key tag ranges from dnssec-policy ($n)"
+ret=0
+zone=settagrangepolicy
+ksk=$("$KEYGEN" -f KSK -k tagged-keys -l kasp.conf "$zone")
+zsk=$("$KEYGEN" -f ZSK -k tagged-keys -l kasp.conf "$zone")
 kid=$(keyfile_to_key_id "$ksk")
 zid=$(keyfile_to_key_id "$zsk")
 [ $kid -ge 0 -a $kid -le 32767 ] || ret=1

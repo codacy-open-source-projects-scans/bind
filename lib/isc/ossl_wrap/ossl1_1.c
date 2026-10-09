@@ -410,29 +410,78 @@ cleanup:
 isc_result_t
 isc_ossl_wrap_generate_pkcs11_rsa_key(char *uri, size_t bit_size,
 				      EVP_PKEY **pkeyp) {
-	UNUSED(uri);
+	REQUIRE(uri != NULL);
+	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
 
-	return isc_ossl_wrap_generate_rsa_key(NULL, bit_size, pkeyp);
+	UNUSED(uri);
+	UNUSED(bit_size);
+	UNUSED(pkeyp);
+	return ISC_R_NOTIMPLEMENTED;
+}
+
+isc_result_t
+isc_ossl_wrap_generate_pkcs11_ed25519_key(char *uri, EVP_PKEY **pkeyp) {
+	REQUIRE(uri != NULL);
+	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
+
+	UNUSED(uri);
+	UNUSED(pkeyp);
+	return ISC_R_NOTIMPLEMENTED;
+}
+
+isc_result_t
+isc_ossl_wrap_generate_pkcs11_ed448_key(char *uri, EVP_PKEY **pkeyp) {
+	REQUIRE(uri != NULL);
+	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
+
+	UNUSED(uri);
+	UNUSED(pkeyp);
+	return ISC_R_NOTIMPLEMENTED;
 }
 
 bool
-isc_ossl_wrap_rsa_key_bits_leq(EVP_PKEY *pkey, size_t limit) {
+isc_ossl_wrap_rsa_exponent_is_allowed(EVP_PKEY *pkey) {
 	const RSA *rsa;
 	const BIGNUM *ce;
-	size_t bits = SIZE_MAX;
+	BIGNUM *emin = NULL;
+	BIGNUM *emax = NULL;
+	bool ok = false;
 
 	REQUIRE(pkey != NULL);
 
 	rsa = EVP_PKEY_get0_RSA(pkey);
-	if (rsa != NULL) {
-		ce = NULL;
-		RSA_get0_key(rsa, NULL, &ce, NULL);
-		if (ce != NULL) {
-			bits = BN_num_bits(ce);
-		}
+	if (rsa == NULL) {
+		return false;
+	}
+	ce = NULL;
+	RSA_get0_key(rsa, NULL, &ce, NULL);
+	if (ce == NULL) {
+		return false;
 	}
 
-	return bits <= limit;
+	emin = BN_new();
+	if (emin == NULL || !BN_set_word(emin, 3)) {
+		goto cleanup;
+	}
+	if (BN_hex2bn(&emax, "100000001") == 0) {
+		goto cleanup;
+	}
+
+	ok = BN_is_odd(ce) && BN_cmp(ce, emin) >= 0 && BN_cmp(ce, emax) <= 0;
+
+cleanup:
+	BN_free(emin);
+	BN_free(emax);
+	return ok;
+}
+
+bool
+isc_ossl_wrap_rsa_modulus_bits_in_range(EVP_PKEY *pkey, size_t min,
+					size_t max) {
+	REQUIRE(pkey != NULL);
+
+	int bits = EVP_PKEY_bits(pkey);
+	return bits > 0 && (size_t)bits >= min && (size_t)bits <= max;
 }
 
 isc_result_t
@@ -543,8 +592,6 @@ isc_ossl_wrap_load_rsa_secret_from_components(isc_ossl_wrap_rsa_components_t *c,
 
 	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
 	REQUIRE(c != NULL);
-
-	result = ISC_R_SUCCESS;
 
 	rsa = RSA_new();
 	if (rsa == NULL) {

@@ -1,11 +1,1 @@
-include "kasp.conf";
-include "named.common.conf";
-
-{% for zone in ['manual-rollover.kasp', 'manual-rollover-zrrsig-rumoured.kasp'] %}
-zone "@zone@" {
-        type primary;
-        file "@zone@.db";
-        dnssec-policy "manual-rollover";
-};
-
-{% endfor %}
+include "named-@testconf@.conf";

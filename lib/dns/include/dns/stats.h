@@ -71,7 +71,8 @@ enum {
 	dns_resstatscounter_nextitem = 38,
 	dns_resstatscounter_priming = 39,
 	dns_resstatscounter_forwardonlyfail = 40,
-	dns_resstatscounter_max = 41,
+	dns_resstatscounter_mismatchtcp = 41,
+	dns_resstatscounter_max = 42,
 
 	/*
 	 * DNSSEC stats.
@@ -234,16 +235,13 @@ enum {
  * _STALE
  *	RRset type counters only.  This indicates a record that is stale
  *	but may still be served.
- *
- * _ANCIENT
- *	RRset type counters only.  This indicates a record that is marked for
- *	removal.
  */
-#define DNS_RDATASTATSTYPE_ATTR_OTHERTYPE 0x0001
-#define DNS_RDATASTATSTYPE_ATTR_NXRRSET	  0x0002
-#define DNS_RDATASTATSTYPE_ATTR_NXDOMAIN  0x0004
-#define DNS_RDATASTATSTYPE_ATTR_STALE	  0x0008
-#define DNS_RDATASTATSTYPE_ATTR_ANCIENT	  0x0010
+enum {
+	DNS_RDATASTATSTYPE_ATTR_OTHERTYPE = 1 << 0,
+	DNS_RDATASTATSTYPE_ATTR_NXRRSET = 1 << 1,
+	DNS_RDATASTATSTYPE_ATTR_NXDOMAIN = 1 << 2,
+	DNS_RDATASTATSTYPE_ATTR_STALE = 1 << 3,
+};
 
 /*%<
  * Conversion macros among dns_rdatatype_t, attributes and isc_statscounter_t.
@@ -331,7 +329,7 @@ dns_rcodestats_create(isc_mem_t *mctx, isc_statsmulti_t **statsp);
 void
 dns_dnssecsignstats_create(isc_mem_t *mctx, dns_stats_t **statsp);
 /*%<
- * Create a statistics counter structure per assigned DNSKEY id.
+ * Create a statistics counter structure per DNSKEY algorithm and key tag.
  *
  * Requires:
  *\li	'mctx' must be a valid memory context.
@@ -430,6 +428,7 @@ dns_dnssecsignstats_increment(dns_stats_t *stats, dns_keytag_t id, uint8_t alg,
  *
  * Requires:
  *\li	'stats' is a valid dns_stats_t created by dns_dnssecsignstats_create().
+ *\li	Calls that increment or clear 'stats' are serialized by the caller.
  */
 
 void
@@ -439,6 +438,7 @@ dns_dnssecsignstats_clear(dns_stats_t *stats, dns_keytag_t id, uint8_t alg);
  *
  * Requires:
  *\li	'stats' is a valid dns_stats_t created by dns_dnssecsignstats_create().
+ *\li	Calls that increment or clear 'stats' are serialized by the caller.
  */
 
 void
@@ -492,14 +492,15 @@ dns_dnssecsignstats_dump(dns_stats_t *stats, dnssecsignstats_type_t operation,
 			 dns_dnssecsignstats_dumper_t dump_fn, void *arg,
 			 unsigned int options);
 /*%<
- * Dump the current statistics counters in a specified way.  For each counter
- * in stats, dump_fn is called with the corresponding type in the form of
- * dns_rdatastatstype_t, the current counter value and the given argument
- * arg.  By default counters that have a value of 0 is skipped; if options has
- * the ISC_STATSDUMP_VERBOSE flag, even such counters are dumped.
+ * Dump the current statistics counters for 'operation'. For each DNSKEY,
+ * dump_fn is called with the algorithm in the upper 16 bits of the key and the
+ * key tag in the lower 16 bits, the current counter value, and 'arg'. By
+ * default counters with a value of 0 are skipped; if options has the
+ * ISC_STATSDUMP_VERBOSE flag, zero-valued counters are dumped too.
  *
  * Requires:
- *\li	'stats' is a valid dns_stats_t created by dns_generalstats_create().
+ *\li	'stats' is a valid dns_stats_t created by
+ *	dns_dnssecsignstats_create().
  */
 
 void

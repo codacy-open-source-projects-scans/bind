@@ -712,6 +712,7 @@ xfrout_delayed_timeout(void *arg, isc_result_t result);
 void
 ns_xfr_start(ns_client_t *client, dns_rdatatype_t reqtype) {
 	isc_result_t result;
+	dns_linkedname_t *question_name_wl;
 	dns_name_t *question_name;
 	dns_rdataset_t *question_rdataset;
 	dns_zone_t *zone = NULL, *raw = NULL, *mayberaw;
@@ -738,6 +739,7 @@ ns_xfr_start(ns_client_t *client, dns_rdatatype_t reqtype) {
 	bool is_poll = false;
 	bool is_dlz = false;
 	bool is_ixfr = false;
+	bool is_quota_applied = false;
 	bool useviewacl = false;
 	uint32_t begin_serial = 0, current_serial;
 
@@ -754,16 +756,6 @@ ns_xfr_start(ns_client_t *client, dns_rdatatype_t reqtype) {
 
 	ns_client_log(client, DNS_LOGCATEGORY_XFER_OUT, NS_LOGMODULE_XFER_OUT,
 		      ISC_LOG_DEBUG(6), "%s request", mnemonic);
-	/*
-	 * Apply quota.
-	 */
-	result = isc_quota_acquire(&client->manager->sctx->xfroutquota);
-	if (result != ISC_R_SUCCESS) {
-		isc_log_write(DNS_LOGCATEGORY_XFER_OUT, NS_LOGMODULE_XFER_OUT,
-			      ISC_LOG_WARNING, "%s request denied: %s",
-			      mnemonic, isc_result_totext(result));
-		goto max_quota;
-	}
 
 	/*
 	 * Interpret the question section.
@@ -774,15 +766,17 @@ ns_xfr_start(ns_client_t *client, dns_rdatatype_t reqtype) {
 	 * The question section must contain exactly one question, and
 	 * it must be for AXFR/IXFR as appropriate.
 	 */
-	question_name = ISC_LIST_HEAD(request->sections[DNS_SECTION_QUESTION]);
-	question_rdataset = ISC_LIST_HEAD(question_name->list);
+	question_name_wl =
+		ISC_LIST_HEAD(request->sections[DNS_SECTION_QUESTION]);
+	question_name = dns_name(question_name_wl);
+	question_rdataset = ISC_LIST_HEAD(question_name_wl->list);
 	question_class = question_rdataset->rdclass;
 	INSIST(question_rdataset->type == reqtype);
 	if (ISC_LIST_NEXT(question_rdataset, link) != NULL) {
 		FAILC(DNS_R_FORMERR, "multiple questions");
 	}
 
-	if (ISC_LIST_NEXT(question_name, link) != NULL) {
+	if (ISC_LIST_NEXT(question_name_wl, link) != NULL) {
 		FAILC(DNS_R_FORMERR, "multiple questions");
 	}
 
@@ -916,11 +910,22 @@ got_soa:
 	/*
 	 * AXFR over UDP is not possible.
 	 */
-	if (reqtype == dns_rdatatype_axfr &&
-	    (client->inner.attributes & NS_CLIENTATTR_TCP) == 0)
-	{
+	if (reqtype == dns_rdatatype_axfr && !client->inner.tcp) {
 		FAILC(DNS_R_FORMERR, "attempted AXFR over UDP");
 	}
+
+	/*
+	 * Apply quota after ACL is checked, so that unauthorized clients
+	 * can not starve the authorized clients.
+	 */
+	result = isc_quota_acquire(&client->manager->sctx->xfroutquota);
+	if (result != ISC_R_SUCCESS) {
+		isc_log_write(DNS_LOGCATEGORY_XFER_OUT, NS_LOGMODULE_XFER_OUT,
+			      ISC_LOG_WARNING, "%s request denied: %s",
+			      mnemonic, isc_result_totext(result));
+		goto cleanup;
+	}
+	is_quota_applied = true;
 
 	/*
 	 * Look up the requesting server in the peer table.
@@ -968,7 +973,7 @@ got_soa:
 		 * IXFR over UDP (currently, we always do).
 		 */
 		if (DNS_SERIAL_GE(begin_serial, current_serial) ||
-		    (client->inner.attributes & NS_CLIENTATTR_TCP) == 0)
+		    !client->inner.tcp)
 		{
 			CHECK(soa_rrstream_create(mctx, db, ver, &stream));
 			is_poll = true;
@@ -979,7 +984,7 @@ got_soa:
 		 * Outgoing IXFR may have been disabled for this peer
 		 * or globally.
 		 */
-		if ((client->inner.attributes & NS_CLIENTATTR_TCP) != 0) {
+		if (client->inner.tcp) {
 			bool provide_ixfr;
 
 			provide_ixfr = client->inner.view->provideixfr;
@@ -1060,7 +1065,7 @@ have_stream:
 	CHECK(dns_message_getquerytsig(request, mctx, &tsigbuf));
 	/*
 	 * Create the xfrout context object.  This transfers the ownership
-	 * of "stream", "db", "ver", and "quota" to the xfrout context object.
+	 * of "stream", "db" and "ver" to the xfrout context object.
 	 */
 
 	if (is_dlz) {
@@ -1112,8 +1117,7 @@ have_stream:
 	if (zone != NULL) {
 		dns_zone_getraw(zone, &raw);
 		mayberaw = (raw != NULL) ? raw : zone;
-		if ((client->inner.attributes & NS_CLIENTATTR_WANTEXPIRE) !=
-			    0 &&
+		if (client->inner.wantexpire &&
 		    (dns_zone_gettype(mayberaw) == dns_zone_secondary ||
 		     dns_zone_gettype(mayberaw) == dns_zone_mirror))
 		{
@@ -1124,8 +1128,7 @@ have_stream:
 			if (secs >= client->inner.now &&
 			    result == ISC_R_SUCCESS)
 			{
-				client->inner.attributes |=
-					NS_CLIENTATTR_HAVEEXPIRE;
+				client->inner.haveexpire = true;
 				client->inner.expire = secs - client->inner.now;
 			}
 		}
@@ -1179,10 +1182,13 @@ cleanup:
 	}
 
 	if (xfr != NULL) {
+		/* The quota will be released in xfrout_ctx_destroy(). */
+		INSIST(is_quota_applied);
 		xfrout_fail(xfr, result, "setting up zone transfer");
 	} else if (result != ISC_R_SUCCESS) {
-		isc_quota_release(&client->manager->sctx->xfroutquota);
-	max_quota:
+		if (is_quota_applied) {
+			isc_quota_release(&client->manager->sctx->xfroutquota);
+		}
 		ns_client_log(client, DNS_LOGCATEGORY_XFER_OUT,
 			      NS_LOGMODULE_XFER_OUT, ISC_LOG_DEBUG(3),
 			      "zone transfer setup failed");
@@ -1272,8 +1278,7 @@ xfrout_ctx_create(isc_mem_t *mctx, ns_client_t *client, unsigned int id,
 
 static void
 xfrout_send(xfrout_ctx_t *xfr) {
-	const bool is_tcp =
-		((xfr->client->inner.attributes & NS_CLIENTATTR_TCP) != 0);
+	const bool is_tcp = xfr->client->inner.tcp;
 
 	if (is_tcp) {
 		isc_region_t used;
@@ -1352,7 +1357,7 @@ sendstream(xfrout_ctx_t *xfr) {
 	dns_message_t *msg = NULL; /* Client message if UDP, tcpmsg if TCP */
 	isc_result_t result;
 	dns_rdataset_t *qrdataset;
-	dns_name_t *msgname = NULL;
+	dns_linkedname_t *msgname = NULL;
 	dns_rdata_t *msgrdata = NULL;
 	dns_rdatalist_t *msgrdl = NULL;
 	dns_rdataset_t *msgrds = NULL;
@@ -1364,7 +1369,7 @@ sendstream(xfrout_ctx_t *xfr) {
 	isc_buffer_clear(&xfr->buf);
 	isc_buffer_clear(&xfr->txbuf);
 
-	is_tcp = ((xfr->client->inner.attributes & NS_CLIENTATTR_TCP) != 0);
+	is_tcp = xfr->client->inner.tcp;
 	if (!is_tcp) {
 		/*
 		 * In the UDP case, we put the response data directly into
@@ -1388,7 +1393,7 @@ sendstream(xfrout_ctx_t *xfr) {
 		msg->id = xfr->id;
 		msg->rcode = dns_rcode_noerror;
 		msg->flags = DNS_MESSAGEFLAG_QR | DNS_MESSAGEFLAG_AA;
-		if ((xfr->client->inner.attributes & NS_CLIENTATTR_RA) != 0) {
+		if (xfr->client->inner.ra) {
 			msg->flags |= DNS_MESSAGEFLAG_RA;
 		}
 		CHECK(dns_message_settsigkey(msg, xfr->tsigkey));
@@ -1401,17 +1406,13 @@ sendstream(xfrout_ctx_t *xfr) {
 		/*
 		 * Add a EDNS option to the message?
 		 */
-		if ((xfr->client->inner.attributes & NS_CLIENTATTR_WANTOPT) !=
-		    0)
-		{
+		if (xfr->client->inner.wantopt) {
 			CHECK(ns_client_addopt(xfr->client, msg));
 			/*
 			 * Add to first message only.
 			 */
-			xfr->client->inner.attributes &=
-				~NS_CLIENTATTR_WANTNSID;
-			xfr->client->inner.attributes &=
-				~NS_CLIENTATTR_HAVEEXPIRE;
+			xfr->client->inner.wantnsid = false;
+			xfr->client->inner.haveexpire = false;
 		}
 
 		/*
@@ -1428,7 +1429,7 @@ sendstream(xfrout_ctx_t *xfr) {
 		 * have a question section.
 		 */
 		if (!xfr->question_added) {
-			dns_name_t *qname = NULL;
+			dns_linkedname_t *qname = NULL;
 			isc_region_t r;
 
 			/*
@@ -1449,7 +1450,7 @@ sendstream(xfrout_ctx_t *xfr) {
 			r.length = xfr->qname->length;
 			isc_buffer_putmem(&xfr->buf, xfr->qname->ndata,
 					  xfr->qname->length);
-			dns_name_fromregion(qname, &r);
+			dns_name_fromregion(dns_name(qname), &r);
 			ISC_LIST_INIT(qname->list);
 			ISC_LIST_APPEND(qname->list, qrdataset, link);
 
@@ -1517,7 +1518,7 @@ sendstream(xfrout_ctx_t *xfr) {
 		INSIST(r.length >= name->length);
 		r.length = name->length;
 		isc_buffer_putmem(&xfr->buf, name->ndata, name->length);
-		dns_name_fromregion(msgname, &r);
+		dns_name_fromregion(dns_name(msgname), &r);
 
 		/* Reserve space for RR header. */
 		isc_buffer_add(&xfr->buf, 10);
@@ -1664,7 +1665,7 @@ static void
 xfrout_senddone(isc_nmhandle_t *handle, isc_result_t result, void *arg) {
 	xfrout_ctx_t *xfr = (xfrout_ctx_t *)arg;
 
-	REQUIRE((xfr->client->inner.attributes & NS_CLIENTATTR_TCP) != 0);
+	REQUIRE(xfr->client->inner.tcp);
 
 	INSIST(handle == xfr->client->inner.handle);
 

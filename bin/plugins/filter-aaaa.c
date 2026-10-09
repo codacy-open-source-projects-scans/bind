@@ -88,12 +88,6 @@ typedef struct filter_instance {
 #define FILTER_AAAA_FILTERED  0x0002 /* AAAA was removed from answer */
 
 /*
- * Client attribute tests.
- */
-#define WANTDNSSEC(c)  (((c)->inner.attributes & NS_CLIENTATTR_WANTDNSSEC) != 0)
-#define RECURSIONOK(c) (((c)->query.attributes & NS_QUERYATTR_RECURSIONOK) != 0)
-
-/*
  * Forward declarations of functions referenced in install_hooks().
  */
 static ns_hookresult_t
@@ -287,7 +281,7 @@ parse_parameters(filter_instance_t *inst, const char *parameters,
 					 (cfg_aclconfctx_t *)aclctx, mctx, 0,
 					 &inst->aaaa_acl));
 	} else {
-		CHECK(dns_acl_any(mctx, &inst->aaaa_acl));
+		dns_acl_any(mctx, &inst->aaaa_acl);
 	}
 
 cleanup:
@@ -522,12 +516,13 @@ mark_as_rendered(dns_rdataset_t *rdataset, dns_rdataset_t *sigrdataset) {
  * above processing to happen.
  */
 static bool
-process_name(query_ctx_t *qctx, filter_aaaa_t mode, const dns_name_t *name,
-	     dns_rdatatype_t type, bool only_if_a_exists) {
+process_name(query_ctx_t *qctx, filter_aaaa_t mode,
+	     const dns_linkedname_t *name, dns_rdatatype_t type,
+	     bool only_if_a_exists) {
 	dns_rdataset_t *rdataset = NULL, *sigrdataset = NULL;
 	isc_result_t result;
 	bool modified = false;
-	dns_name_t *n = UNCONST(name);
+	dns_linkedname_t *n = UNCONST(name);
 
 	if (only_if_a_exists) {
 		CHECK(dns_message_findtype(n, dns_rdatatype_a, 0, NULL));
@@ -537,7 +532,7 @@ process_name(query_ctx_t *qctx, filter_aaaa_t mode, const dns_name_t *name,
 	(void)dns_message_findtype(n, dns_rdatatype_rrsig, type, &sigrdataset);
 
 	if (rdataset != NULL &&
-	    (sigrdataset == NULL || !WANTDNSSEC(qctx->client) ||
+	    (sigrdataset == NULL || !qctx->client->inner.wantdnssec ||
 	     mode == BREAK_DNSSEC))
 	{
 		/*
@@ -687,18 +682,29 @@ filter_respond_begin(void *arg, void *cbdata, isc_result_t *resp) {
 
 	if (client_state->mode != BREAK_DNSSEC &&
 	    (client_state->mode != FILTER ||
-	     (WANTDNSSEC(qctx->client) && qctx->sigrdataset != NULL &&
+	     (qctx->client->inner.wantdnssec && qctx->sigrdataset != NULL &&
 	      dns_rdataset_isassociated(qctx->sigrdataset))))
 	{
 		return NS_HOOK_CONTINUE;
 	}
 
 	if (qctx->qtype == dns_rdatatype_aaaa) {
+		dns_fixedname_t tfoundname;
 		dns_rdataset_t *trdataset;
+
+		if (dns_name_empty(dns_fixedname_name(&qctx->foundname))) {
+			return NS_HOOK_CONTINUE;
+		}
+
 		trdataset = ns_client_newrdataset(qctx->client);
-		result = dns_db_findrdataset(
-			qctx->db, qctx->node, qctx->version, dns_rdatatype_a, 0,
-			qctx->client->inner.now, trdataset, NULL);
+		/* Preserve the trust-agnostic node lookup used previously. */
+		result = dns_db_find(
+			qctx->db, dns_fixedname_name(&qctx->foundname),
+			qctx->version, dns_rdatatype_a,
+			DNS_DBFIND_GLUEOK | DNS_DBFIND_ADDITIONALOK |
+				DNS_DBFIND_PENDINGOK,
+			qctx->client->inner.now,
+			dns_fixedname_initname(&tfoundname), trdataset, NULL);
 		dns_rdataset_cleanup(trdataset);
 		ns_client_putrdataset(qctx->client, &trdataset);
 
@@ -717,11 +723,12 @@ filter_respond_begin(void *arg, void *cbdata, isc_result_t *resp) {
 		 * that we care more about As than AAAAs, and would have
 		 * cached an A if it existed.
 		 */
-		if (result == ISC_R_SUCCESS) {
+		if (result == ISC_R_SUCCESS || result == DNS_R_GLUE) {
 			mark_as_rendered(qctx->rdataset, qctx->sigrdataset);
 			qctx->client->message->flags &= ~DNS_MESSAGEFLAG_AD;
 			client_state->flags |= FILTER_AAAA_FILTERED;
-		} else if (!qctx->authoritative && RECURSIONOK(qctx->client) &&
+		} else if (!qctx->authoritative &&
+			   qctx->client->query.recursionok &&
 			   (result == DNS_R_DELEGATION ||
 			    result == ISC_R_NOTFOUND))
 		{
@@ -733,13 +740,13 @@ filter_respond_begin(void *arg, void *cbdata, isc_result_t *resp) {
 			 * We'll make a note to not render it
 			 * if the recursion for the A succeeds.
 			 */
-			result = ns_query_recurse(qctx->client, dns_rdatatype_a,
-						  qctx->client->query.qname,
-						  NULL, NULL, qctx->resuming);
+			result = ns_query_recurse(
+				qctx->client, dns_rdatatype_a,
+				dns_name(qctx->client->query.qname),
+				qctx->resuming);
 			if (result == ISC_R_SUCCESS) {
 				client_state->flags |= FILTER_AAAA_RECURSING;
-				qctx->client->query.attributes |=
-					NS_QUERYATTR_RECURSING;
+				qctx->client->query.recursing = true;
 			}
 		}
 	} else if (qctx->qtype == dns_rdatatype_a &&
@@ -749,7 +756,7 @@ filter_respond_begin(void *arg, void *cbdata, isc_result_t *resp) {
 			.qctx = qctx,
 			.mode = client_state->mode,
 			.section = DNS_SECTION_ANSWER,
-			.name = qctx->fname,
+			.name = dns_name(qctx->fname),
 			.type = dns_rdatatype_aaaa,
 		};
 		process_section(&filter_answer);
@@ -790,7 +797,7 @@ filter_respond_any_found(void *arg, void *cbdata, isc_result_t *resp) {
 			.qctx = qctx,
 			.mode = client_state->mode,
 			.section = DNS_SECTION_ANSWER,
-			.name = qctx->tname,
+			.name = dns_name(qctx->tname),
 			.type = dns_rdatatype_aaaa,
 			.only_if_a_exists = qctx->authoritative,
 		};

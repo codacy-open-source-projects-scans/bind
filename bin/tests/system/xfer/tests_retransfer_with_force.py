@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -28,7 +28,9 @@ def test_wait_for_zone_retransfer(named_port, ns6):
     with ns6.watch_log_from_here() as watcher:
         ns6.rndc("retransfer axfr-rndc-retransfer-force.")
         watcher.wait_for_line(
-            f"'axfr-rndc-retransfer-force/IN' from 10.53.0.1#{named_port}: received"
+            isctest.transfer.transfer_message(
+                "axfr-rndc-retransfer-force", "10.53.0.1", "received", named_port
+            )
         )
 
 
@@ -36,15 +38,25 @@ def test_cancel_ongoing_retransfer(named_port, ns6):
     isctest.log.info(
         "Issue a retransfer-force command which should cancel the ongoing transfer and start a new one."
     )
-    with ns6.watch_log_from_here(timeout=30) as watcher_transfer_success:
-        with ns6.watch_log_from_here() as watcher_transfer_shutting_down:
+    with ns6.watch_log_from_here(timeout=60) as watcher_transfer_success:
+        with ns6.watch_log_from_here(timeout=60) as watcher_transfer_shutting_down:
             ns6.rndc("retransfer -force axfr-rndc-retransfer-force.")
             watcher_transfer_shutting_down.wait_for_line(
-                f"'axfr-rndc-retransfer-force/IN' from 10.53.0.1#{named_port}: Transfer status: shutting down"
+                isctest.transfer.transfer_message(
+                    "axfr-rndc-retransfer-force",
+                    "10.53.0.1",
+                    "Transfer status: shutting down",
+                    named_port,
+                )
             )
         isctest.log.info("Wait for the new transfer to complete successfully")
         watcher_transfer_success.wait_for_line(
-            f"'axfr-rndc-retransfer-force/IN' from 10.53.0.1#{named_port}: Transfer status: success"
+            isctest.transfer.transfer_message(
+                "axfr-rndc-retransfer-force",
+                "10.53.0.1",
+                "Transfer status: success",
+                named_port,
+            )
         )
 
 

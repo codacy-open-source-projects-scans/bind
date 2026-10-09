@@ -1,15 +1,13 @@
-"""
-Copyright (C) Internet Systems Consortium, Inc. ("ISC")
-
-SPDX-License-Identifier: MPL-2.0
-
-This Source Code Form is subject to the terms of the Mozilla Public
-License, v. 2.0.  If a copy of the MPL was not distributed with this
-file, you can obtain one at https://mozilla.org/MPL/2.0/.
-
-See the COPYRIGHT file distributed with this work for additional
-information regarding copyright ownership.
-"""
+# Copyright (C) Internet Systems Consortium, Inc. ("ISC")
+#
+# SPDX-License-Identifier: MPL-2.0
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, you can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# See the COPYRIGHT file distributed with this work for additional
+# information regarding copyright ownership.
 
 from collections.abc import AsyncGenerator
 
@@ -19,10 +17,10 @@ import dns.rrset
 
 from isctest.asyncserver import (
     ControllableAsyncDnsServer,
-    DnsResponseSend,
     QueryContext,
     ResponseHandler,
 )
+from isctest.asyncserver.actions import DnsResponseSend
 
 
 class DelayedAddressAnswerHandler(ResponseHandler):
@@ -34,12 +32,10 @@ class DelayedAddressAnswerHandler(ResponseHandler):
             rrset = dns.rrset.from_text(qctx.qname, 300, qctx.qclass, qctx.qtype, addr)
             qctx.response.answer.append(rrset)
 
-        delay = 0
-        if (
-            len(qctx.qname.labels) >= 2
-            and qctx.qname.labels[1] == b"latency"
-            and qctx.qname.labels[0].isdigit()
-        ):
+        # <delay-in-ms>.<...>.latency...: any labels between the delay and
+        # "latency" are ignored; tests use them to bypass the resolver cache
+        delay = 0.0
+        if b"latency" in qctx.qname.labels[1:] and qctx.qname.labels[0].isdigit():
             delay = int(qctx.qname.labels[0]) / 1000
         yield DnsResponseSend(qctx.response, delay=delay)
 

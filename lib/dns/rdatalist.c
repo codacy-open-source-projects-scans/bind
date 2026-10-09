@@ -19,7 +19,6 @@
 #include <isc/util.h>
 
 #include <dns/name.h>
-#include <dns/nsec3.h>
 #include <dns/rdata.h>
 #include <dns/rdatalist.h>
 #include <dns/rdataset.h>
@@ -33,8 +32,6 @@ static dns_rdatasetmethods_t methods = {
 	.count = dns__rdatalist_count,
 	.addnoqname = dns__rdatalist_addnoqname,
 	.getnoqname = dns__rdatalist_getnoqname,
-	.addclosest = dns__rdatalist_addclosest,
-	.getclosest = dns__rdatalist_getclosest,
 	.setownercase = dns__rdatalist_setownercase,
 	.getownercase = dns__rdatalist_getownercase,
 };
@@ -169,51 +166,65 @@ dns__rdatalist_count(dns_rdataset_t *rdataset) {
 	return count;
 }
 
+/*
+ * Find the denial of existence proof of the given type at 'name': the
+ * NSEC or NSEC3 rdataset together with the RRSIG rdataset covering it.
+ */
+static bool
+findproof(dns_linkedname_t *name, dns_rdataclass_t rdclass,
+	  dns_rdatatype_t type, dns_rdataset_t **negp,
+	  dns_rdataset_t **negsigp) {
+	dns_rdataset_t *neg = NULL;
+	dns_rdataset_t *negsig = NULL;
+
+	REQUIRE(dns_rdatatype_isnsec(type));
+
+	ISC_LIST_FOREACH(name->list, rdset, link) {
+		if (rdset->rdclass != rdclass) {
+			continue;
+		}
+
+		if (rdset->type == type) {
+			neg = rdset;
+		} else if (rdset->type == dns_rdatatype_rrsig &&
+			   rdset->covers == type)
+		{
+			negsig = rdset;
+		}
+
+		if (neg != NULL && negsig != NULL) {
+			*negp = neg;
+			*negsigp = negsig;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 isc_result_t
-dns__rdatalist_addnoqname(dns_rdataset_t *rdataset, dns_name_t *name) {
+dns__rdatalist_addnoqname(dns_rdataset_t *rdataset, dns_linkedname_t *name,
+			  dns_rdatatype_t type) {
 	dns_rdataset_t *neg = NULL;
 	dns_rdataset_t *negsig = NULL;
 	dns_ttl_t ttl;
 
 	REQUIRE(rdataset != NULL);
+	REQUIRE(DNS_NAME_VALID(dns_linkedname_name(name)));
 
-	ISC_LIST_FOREACH(name->list, rdset, link) {
-		if (rdset->rdclass != rdataset->rdclass) {
-			continue;
-		}
-		if (dns_rdatatype_isnsec(rdset->type)) {
-			neg = rdset;
-		}
-	}
-	if (neg == NULL) {
-		return ISC_R_NOTFOUND;
-	}
-
-	ISC_LIST_FOREACH(name->list, rdset, link) {
-		if (rdset->type == dns_rdatatype_rrsig &&
-		    rdset->covers == neg->type)
-		{
-			negsig = rdset;
-		}
-	}
-
-	if (negsig == NULL) {
+	if (!findproof(name, rdataset->rdclass, type, &neg, &negsig)) {
 		return ISC_R_NOTFOUND;
 	}
 
 	/*
 	 * Minimise ttl.
 	 */
-	ttl = rdataset->ttl;
-	if (neg->ttl < ttl) {
-		ttl = neg->ttl;
-	}
-	if (negsig->ttl < ttl) {
-		ttl = negsig->ttl;
-	}
+	ttl = ISC_MIN(rdataset->ttl, ISC_MIN(neg->ttl, negsig->ttl));
 	rdataset->ttl = neg->ttl = negsig->ttl = ttl;
 	rdataset->attributes.noqname = true;
 	rdataset->rdlist.noqname = name;
+	rdataset->rdlist.noqnametype = type;
+
 	return ISC_R_SUCCESS;
 }
 
@@ -221,136 +232,24 @@ isc_result_t
 dns__rdatalist_getnoqname(dns_rdataset_t *rdataset, dns_name_t *name,
 			  dns_rdataset_t *neg,
 			  dns_rdataset_t *negsig DNS__DB_FLARG) {
-	dns_rdataclass_t rdclass;
 	dns_rdataset_t *tneg = NULL;
 	dns_rdataset_t *tnegsig = NULL;
-	dns_name_t *noqname = NULL;
+	dns_linkedname_t *noqname = NULL;
 
 	REQUIRE(rdataset != NULL);
 	REQUIRE(rdataset->attributes.noqname);
 
-	rdclass = rdataset->rdclass;
 	noqname = rdataset->rdlist.noqname;
 
-	(void)dns_name_dynamic(noqname); /* Sanity Check. */
+	REQUIRE(DNS_NAME_VALID(dns_linkedname_name(noqname)));
 
-	ISC_LIST_FOREACH(noqname->list, rdset, link) {
-		if (rdset->rdclass != rdclass) {
-			continue;
-		}
-		if (dns_rdatatype_isnsec(rdset->type)) {
-			tneg = rdset;
-		}
-	}
-	if (tneg == NULL) {
-		return ISC_R_NOTFOUND;
-	}
-
-	ISC_LIST_FOREACH(noqname->list, rdset, link) {
-		if (rdset->type == dns_rdatatype_rrsig &&
-		    rdset->covers == tneg->type)
-		{
-			tnegsig = rdset;
-		}
-	}
-	if (tnegsig == NULL) {
+	if (!findproof(noqname, rdataset->rdclass, rdataset->rdlist.noqnametype,
+		       &tneg, &tnegsig))
+	{
 		return ISC_R_NOTFOUND;
 	}
 
 	dns_name_clone(noqname, name);
-	dns_rdataset_clone(tneg, neg);
-	dns_rdataset_clone(tnegsig, negsig);
-	return ISC_R_SUCCESS;
-}
-
-isc_result_t
-dns__rdatalist_addclosest(dns_rdataset_t *rdataset, dns_name_t *name) {
-	dns_rdataset_t *neg = NULL;
-	dns_rdataset_t *negsig = NULL;
-	dns_ttl_t ttl;
-
-	REQUIRE(rdataset != NULL);
-
-	ISC_LIST_FOREACH(name->list, rdset, link) {
-		if (rdset->rdclass != rdataset->rdclass) {
-			continue;
-		}
-		if (dns_rdatatype_isnsec(rdset->type)) {
-			neg = rdset;
-		}
-	}
-	if (neg == NULL) {
-		return ISC_R_NOTFOUND;
-	}
-
-	ISC_LIST_FOREACH(name->list, rdset, link) {
-		if (rdset->type == dns_rdatatype_rrsig &&
-		    rdset->covers == neg->type)
-		{
-			negsig = rdset;
-		}
-	}
-
-	if (negsig == NULL) {
-		return ISC_R_NOTFOUND;
-	}
-	/*
-	 * Minimise ttl.
-	 */
-	ttl = rdataset->ttl;
-	if (neg->ttl < ttl) {
-		ttl = neg->ttl;
-	}
-	if (negsig->ttl < ttl) {
-		ttl = negsig->ttl;
-	}
-	rdataset->ttl = neg->ttl = negsig->ttl = ttl;
-	rdataset->attributes.closest = true;
-	rdataset->rdlist.closest = name;
-	return ISC_R_SUCCESS;
-}
-
-isc_result_t
-dns__rdatalist_getclosest(dns_rdataset_t *rdataset, dns_name_t *name,
-			  dns_rdataset_t *neg,
-			  dns_rdataset_t *negsig DNS__DB_FLARG) {
-	dns_rdataclass_t rdclass;
-	dns_rdataset_t *tneg = NULL;
-	dns_rdataset_t *tnegsig = NULL;
-	dns_name_t *closest = NULL;
-
-	REQUIRE(rdataset != NULL);
-	REQUIRE(rdataset->attributes.closest);
-
-	rdclass = rdataset->rdclass;
-	closest = rdataset->rdlist.closest;
-
-	(void)dns_name_dynamic(closest); /* Sanity Check. */
-
-	ISC_LIST_FOREACH(closest->list, rdset, link) {
-		if (rdset->rdclass != rdclass) {
-			continue;
-		}
-		if (dns_rdatatype_isnsec(rdset->type)) {
-			tneg = rdset;
-		}
-	}
-	if (tneg == NULL) {
-		return ISC_R_NOTFOUND;
-	}
-
-	ISC_LIST_FOREACH(closest->list, rdset, link) {
-		if (rdset->type == dns_rdatatype_rrsig &&
-		    rdset->covers == tneg->type)
-		{
-			tnegsig = rdset;
-		}
-	}
-	if (tnegsig == NULL) {
-		return ISC_R_NOTFOUND;
-	}
-
-	dns_name_clone(closest, name);
 	dns_rdataset_clone(tneg, neg);
 	dns_rdataset_clone(tnegsig, negsig);
 	return ISC_R_SUCCESS;

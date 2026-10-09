@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -18,8 +18,13 @@ import dns.rdataclass
 import dns.rdatatype
 import pytest
 
-from isctest.vars.algorithms import RSASHA1, Algorithm
-from nsec3.common import NSEC3_MARK, check_nsec3_case
+from isctest.algorithms import RSASHA1, Algorithm
+from nsec3.common import (
+    NSEC3_MARK,
+    NSEC3_SALTLEN,
+    check_nsec3_case,
+    wait_for_nsec3param,
+)
 
 import isctest
 import isctest.mark
@@ -29,6 +34,7 @@ pytestmark = NSEC3_MARK
 # include the following zones when rendering named configs
 ZONES = {
     "nsec3-to-nsec.kasp",
+    "nsec3-to-nsec-altalg.kasp",
     "nsec-to-nsec3.kasp",
     "nsec3.kasp",
     "nsec3-dynamic.kasp",
@@ -52,6 +58,18 @@ if os.environ["RSASHA1_SUPPORTED"] == "1":
     )
 
 
+def _algorithm_from_env(prefix):
+    return Algorithm(
+        os.environ[f"{prefix}_ALGORITHM"],
+        int(os.environ[f"{prefix}_ALGORITHM_NUMBER"]),
+        int(os.environ[f"{prefix}_ALGORITHM_DST_NUMBER"]),
+        int(os.environ[f"{prefix}_BITS"]),
+    )
+
+
+ALTERNATIVE = _algorithm_from_env("ALTERNATIVE")
+
+
 def bootstrap():
     return {
         "zones": ZONES,
@@ -60,12 +78,10 @@ def bootstrap():
 
 @pytest.fixture(scope="module", autouse=True)
 def after_servers_start(ns3, templates):
-    # First make sure all zones are properly signed. Here we specifically need
-    # to wait until all zones have finished key management before we can
-    # reconfigure the server, because changing the DNSSEC policy relies on
-    # zones having finished applying their initial policy.
+    # First make sure all zones are properly signed.
     for zone in ZONES:
         isctest.kasp.wait_keymgr_done(ns3, zone)
+        wait_for_nsec3param(ns3, zone, NSEC3_SALTLEN[zone].initial)
 
     # Ensure rsasha1-to-nsec3-wait.kasp is fully signed prior to reconfig.
     with_rsasha1 = "RSASHA1_SUPPORTED"
@@ -73,6 +89,10 @@ def after_servers_start(ns3, templates):
     if os.getenv(with_rsasha1) == "1":
         zone = "rsasha1-to-nsec3-wait.kasp"
         isctest.kasp.check_dnssec_verify(ns3, zone)
+
+    # Ensure the default-algorithm signatures are fully established before
+    # the NSEC plus algorithm rollover begins.
+    isctest.kasp.check_dnssec_verify(ns3, "nsec3-to-nsec-altalg.kasp")
 
     # Reconfigure.
     data = {
@@ -82,6 +102,11 @@ def after_servers_start(ns3, templates):
     templates.render(f"{ns3.identifier}/named-fips.conf", data)
     templates.render(f"{ns3.identifier}/named-rsasha1.conf", data)
     ns3.reconfigure()
+
+    # Wait until the NSEC3 chain has finished rebuilding.
+    for zone in ZONES:
+        isctest.kasp.wait_keymgr_done(ns3, zone, reconfig=True)
+        wait_for_nsec3param(ns3, zone, NSEC3_SALTLEN[zone].reconfig)
 
 
 @pytest.mark.parametrize(
@@ -145,15 +170,21 @@ def after_servers_start(ns3, templates):
             },
             id="nsec3-to-nsec.kasp",
         ),
+        pytest.param(
+            {
+                "zone": "nsec3-to-nsec-altalg.kasp",
+                "policy": "nsec-altalg",
+                "key-properties": [
+                    f"csk 0 {Algorithm.default().number} {Algorithm.default().bits} goal:hidden dnskey:omnipresent krrsig:omnipresent zrrsig:omnipresent ds:omnipresent",
+                    f"csk 0 {ALTERNATIVE.number} {ALTERNATIVE.bits} goal:omnipresent dnskey:rumoured krrsig:rumoured zrrsig:rumoured ds:hidden",
+                ],
+            },
+            id="nsec3-to-nsec-altalg.kasp",
+            marks=isctest.mark.with_algorithm(ALTERNATIVE.name),
+        ),
     ],
 )
 def test_nsec_case(ns3, params):
-    zone = params["zone"]
-
-    # First make sure the zone is properly signed.
-    isctest.kasp.wait_keymgr_done(ns3, zone, reconfig=True)
-
-    # Test case.
     check_nsec3_case(ns3, params, nsec3=False)
 
 
@@ -271,13 +302,6 @@ def test_nsec_case(ns3, params):
     ],
 )
 def test_nsec3_case(ns3, params):
-    # Get test parameters.
-    zone = params["zone"]
-
-    # First make sure the zone is properly signed.
-    isctest.kasp.wait_keymgr_done(ns3, zone, reconfig=True)
-
-    # Test case.
     check_nsec3_case(ns3, params)
 
 
@@ -293,9 +317,6 @@ def test_nsec3_ent(ns3, templates):
 
     zone = params["zone"]
     fqdn = f"{zone}."
-
-    # First make sure the zone is properly signed.
-    isctest.kasp.wait_keymgr_done(ns3, zone, reconfig=True)
 
     # Test case.
     check_nsec3_case(ns3, params)

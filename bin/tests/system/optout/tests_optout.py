@@ -1,20 +1,16 @@
-#!/usr/bin/python3
-
 # Copyright (C) Internet Systems Consortium, Inc. ("ISC")
 #
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
 
-
 import os
 import re
-import sys
 
 import dns.query
 import dns.rcode
@@ -24,9 +20,6 @@ import pytest
 import isctest
 
 pytestmark = [
-    pytest.mark.skipif(
-        sys.version_info < (3, 7), reason="Python >= 3.7 required [GL #3001]"
-    ),
     pytest.mark.extra_artifacts(
         [
             "*.out",
@@ -34,7 +27,6 @@ pytestmark = [
             "ns2/*.signed",
             "ns2/*.jnl",
             "ns2/*.jbk",
-            "ns2/controls.conf",
             "ns2/dsset-*",
             "ns2/K*",
         ]

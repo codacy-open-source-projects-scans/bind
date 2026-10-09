@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <isc/attributes.h>
 #include <isc/bit.h>
 #include <isc/refcount.h>
 
@@ -52,7 +53,7 @@
  * In a branch node:
  * - The 64-bit word is subdivided into three portions: the least
  *   significant bits are the node type (for a branch, 0x1); the
- *   most sigificant 15 bits are an offset value into the key, and
+ *   most significant 15 bits are an offset value into the key, and
  *   the 47 bits in the middle are a bitmap; see the documentation
  *   for the SHIFT_* enum below.
  * - The 32-bit word is a reference (dns_qpref_t) to the packed sparse
@@ -336,7 +337,7 @@ typedef struct qp_rcuctx {
 	dns_qpmulti_t *multi;
 	ISC_LINK(struct qp_rcuctx) link;
 	dns_qpchunk_t count;
-	dns_qpchunk_t chunk[];
+	dns_qpchunk_t chunk[] ISC_ATTR_COUNTED_BY(count);
 } qp_rcuctx_t;
 
 /*
@@ -753,7 +754,7 @@ static inline dns_qpweight_t
 branch_count_bitmap_before(dns_qpnode_t *n, dns_qpshift_t bit) {
 	uint64_t mask = (1ULL << bit) - 1 - TAG_MASK;
 	uint64_t bitmap = branch_index(n) & mask;
-	return (dns_qpweight_t)stdc_count_zeros(bitmap);
+	return (dns_qpweight_t)stdc_count_ones(bitmap);
 }
 
 /*
@@ -820,7 +821,7 @@ zero_twigs(dns_qpnode_t *twigs, dns_qpweight_t size) {
  *
  * Packed reader nodes save us from having to track `dns_qpread_t`
  * objects as distinct allocations: the packed reader nodes get
- * reclaimed when the the chunk containing their cells is reclaimed.
+ * reclaimed when the chunk containing their cells is reclaimed.
  * When a real `dns_qpread_t` object is needed, it is allocated on the
  * stack (it must not live longer than a isc_loop callback) and the
  * packed reader is unpacked into it.

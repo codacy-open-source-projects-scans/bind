@@ -101,7 +101,11 @@ fromwire_rt(ARGS_FROMWIRE) {
 	UNUSED(type);
 	UNUSED(rdclass);
 
-	dctx = dns_decompress_setpermitted(dctx, false);
+	/*
+	 * RFC 3597 section 4 asks receivers to decompress this type,
+	 * even though senders must not compress it.
+	 */
+	dctx = dns_decompress_setpermitted(dctx, true);
 
 	dns_name_init(&name);
 
@@ -214,25 +218,9 @@ tostruct_rt(ARGS_TOSTRUCT) {
 	isc_region_consume(&region, 2);
 	dns_name_fromregion(&name, &region);
 	dns_name_init(&rt->host);
-	name_duporclone(&name, mctx, &rt->host);
+	dns_name_clone(&name, &rt->host);
 
-	rt->mctx = mctx;
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_rt(ARGS_FREESTRUCT) {
-	dns_rdata_rt_t *rt = source;
-
-	REQUIRE(rt != NULL);
-	REQUIRE(rt->common.rdtype == dns_rdatatype_rt);
-
-	if (rt->mctx == NULL) {
-		return;
-	}
-
-	dns_name_free(&rt->host, rt->mctx);
-	rt->mctx = NULL;
 }
 
 static isc_result_t

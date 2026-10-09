@@ -193,8 +193,8 @@ totext_in_wks(ARGS_TOTEXT) {
 			for (j = 0; j < 8; j++) {
 				if ((sr.base[i] & (0x80 >> j)) != 0) {
 					{
-						snprintf(buf, sizeof(buf), "%u",
-							 i * 8 + j);
+						snprintf(buf, sizeof(buf),
+							 "%hu", i * 8 + j);
 						RETERR(str_totext(" ", target));
 						RETERR(str_totext(buf, target));
 					}
@@ -314,27 +314,8 @@ tostruct_in_wks(ARGS_TOSTRUCT) {
 	wks->protocol = uint8_fromregion(&region);
 	isc_region_consume(&region, 1);
 	wks->map_len = region.length;
-	wks->map = mem_maybedup(mctx, region.base, region.length);
-	wks->mctx = mctx;
+	wks->map = region.base;
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_in_wks(ARGS_FREESTRUCT) {
-	dns_rdata_in_wks_t *wks = source;
-
-	REQUIRE(wks != NULL);
-	REQUIRE(wks->common.rdtype == dns_rdatatype_wks);
-	REQUIRE(wks->common.rdclass == dns_rdataclass_in);
-
-	if (wks->mctx == NULL) {
-		return;
-	}
-
-	if (wks->map != NULL) {
-		isc_mem_free(wks->mctx, wks->map);
-	}
-	wks->mctx = NULL;
 }
 
 static isc_result_t

@@ -12,8 +12,8 @@
  */
 
 #include <inttypes.h>
-#include <sched.h> /* IWYU pragma: keep */
-#include <setjmp.h>
+#include <sched.h>  /* IWYU pragma: keep */
+#include <setjmp.h> /* IWYU pragma: keep */
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -35,8 +35,12 @@
 #include <isc/types.h>
 #include <isc/util.h>
 
+#include <dns/callbacks.h>
+#include <dns/keyvalues.h>
 #include <dns/lib.h>
+#include <dns/masterdump.h>
 #include <dns/rdata.h>
+#include <dns/secalg.h>
 
 #include "../isc/openssl_shim.c"
 #include "../isc/openssl_shim.h"
@@ -269,7 +273,7 @@ check_struct_conversions(dns_rdata_t *rdata, size_t structsize,
 	/*
 	 * Convert from uncompressed wire form into type-specific struct.
 	 */
-	result = dns_rdata_tostruct(rdata, rdata_struct, NULL);
+	result = dns_rdata_tostruct(rdata, rdata_struct);
 	detect_uncleared_libcrypto_error();
 	assert_int_equal(result, ISC_R_SUCCESS);
 
@@ -2255,20 +2259,22 @@ ISC_RUN_TEST_IMPL(key) {
 		 *   - 1 octet for Algorithm,
 		 *   - variable number of octets for Public Key.
 		 *
-		 * RFC 2535 section 3.1.2 states that if bits
+		 * RFC 2535 section 3.1.2 stated that if bits
 		 * 0-1 of Flags are both set, the RR stops after
 		 * the algorithm octet and thus its length must
 		 * be 4 octets.  In any other case, though, the
-		 * Public Key part must not be empty.
+		 * Public Key part must not be empty.  This was
+		 * modified by RFC 3445 which removed
+		 * flags 0-1, and hence the concept of NOKEY.
 		 *
 		 * Algorithms PRIVATEDNS (253) and PRIVATEOID (254)
-		 * have an algorithm identifier embedded and the start
+		 * have an algorithm identifier embedded at the start
 		 * of the public key.
 		 */
 		WIRE_INVALID(0x00), WIRE_INVALID(0x00, 0x00),
 		WIRE_INVALID(0x00, 0x00, 0x00),
-		WIRE_VALID(0xc0, 0x00, 0x00, 0x00),
-		WIRE_INVALID(0xc0, 0x00, 0x00, 0x00, 0x00),
+		WIRE_INVALID(0xc0, 0x00, 0x00, 0x00),
+		WIRE_VALID(0xc0, 0x00, 0x00, 0x00, 0x00),
 		WIRE_INVALID(0x00, 0x00, 0x00, 0x00),
 		WIRE_VALID(0x00, 0x00, 0x00, 0x00, 0x00),
 		/* PRIVATEDNS example. without key data */
@@ -2320,6 +2326,89 @@ ISC_RUN_TEST_IMPL(key) {
 
 	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
 		    dns_rdatatype_key, sizeof(dns_rdata_key_t));
+
+	/*
+	 * A valid PRIVATEDNS record with an active region shorter than the
+	 * actual record length.  A bug in dns_name_fromwire meant that this
+	 * was previously accepted.
+	 */
+	unsigned char key[] = { 0x00, 0x00, 0x00, 253, 0x07, 'e', 'x',
+				'a',  'm',  'p',  'l', 'e',  0x00 };
+	unsigned char buf[sizeof(key)];
+	isc_buffer_t source, target;
+	isc_result_t result;
+
+	isc_buffer_init(&source, key, sizeof(key));
+	isc_buffer_add(&source, sizeof(key));
+	isc_buffer_setactive(&source, sizeof(key) - 1);
+	isc_buffer_init(&target, buf, sizeof(buf));
+	result = dns_rdata_fromwire(NULL, dns_rdataclass_in, dns_rdatatype_key,
+				    &source, DNS_DECOMPRESS_ALWAYS, &target);
+	assert_int_not_equal(result, ISC_R_SUCCESS);
+}
+
+/*
+ * L32 tests (RFC 6742): a 16-bit Preference followed by a 32-bit Locator32.
+ * The wire form is a fixed six octets.  The struct round-trip guards against
+ * the Preference being folded back into the locator.
+ */
+ISC_RUN_TEST_IMPL(l32) {
+	text_ok_t text_ok[] = {
+		/* RFC 6742 section 4.2 examples. */
+		TEXT_VALID("10 10.1.2.0"),
+		TEXT_VALID("20 10.1.4.0"),
+		/* Preference out of range. */
+		TEXT_INVALID("65536 10.1.2.0"),
+		/* Locator32 is not a dotted quad. */
+		TEXT_INVALID("10 2001:db8::1"),
+		TEXT_SENTINEL(),
+	};
+	wire_ok_t wire_ok[] = {
+		/* Preference + 32-bit Locator32 == 6 octets. */
+		WIRE_VALID(0x00, 0x0a, 0x0a, 0x01, 0x02, 0x00),
+		/* Too short. */
+		WIRE_INVALID(0x00, 0x0a, 0x0a, 0x01, 0x02),
+		/* Too long. */
+		WIRE_INVALID(0x00, 0x0a, 0x0a, 0x01, 0x02, 0x00, 0x00),
+		WIRE_SENTINEL(),
+	};
+
+	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
+		    dns_rdatatype_l32, sizeof(dns_rdata_l32_t));
+}
+
+/*
+ * L64 tests (RFC 6742): a 16-bit Preference followed by a 64-bit Locator64.
+ * The wire form is a fixed ten octets.
+ */
+ISC_RUN_TEST_IMPL(l64) {
+	text_ok_t text_ok[] = {
+		/* RFC 6742 section 4.3 example. */
+		TEXT_VALID("10 2001:db8:1140:1000"),
+		/* Leading zeroes in a group are dropped on output. */
+		TEXT_VALID_CHANGED("20 2001:0db8:2140:2000",
+				   "20 2001:db8:2140:2000"),
+		/* Preference out of range. */
+		TEXT_INVALID("65536 2001:db8:1140:1000"),
+		/* Wrong number of groups. */
+		TEXT_INVALID("10 2001:db8:1140"),
+		TEXT_SENTINEL(),
+	};
+	wire_ok_t wire_ok[] = {
+		/* Preference + 64-bit Locator64 == 10 octets. */
+		WIRE_VALID(0x00, 0x0a, 0x20, 0x01, 0x0d, 0xb8, 0x11, 0x40, 0x10,
+			   0x00),
+		/* Too short. */
+		WIRE_INVALID(0x00, 0x0a, 0x20, 0x01, 0x0d, 0xb8, 0x11, 0x40,
+			     0x10),
+		/* Too long. */
+		WIRE_INVALID(0x00, 0x0a, 0x20, 0x01, 0x0d, 0xb8, 0x11, 0x40,
+			     0x10, 0x00, 0x00),
+		WIRE_SENTINEL(),
+	};
+
+	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
+		    dns_rdatatype_l64, sizeof(dns_rdata_l64_t));
 }
 
 /*
@@ -2382,6 +2471,39 @@ ISC_RUN_TEST_IMPL(loc) {
 
 	check_rdata(text_ok, 0, NULL, false, dns_rdataclass_in,
 		    dns_rdatatype_loc, sizeof(dns_rdata_loc_t));
+}
+
+/*
+ * NID tests (RFC 6742): a 16-bit Preference followed by a 64-bit Node ID.
+ * The wire form is a fixed ten octets.
+ */
+ISC_RUN_TEST_IMPL(nid) {
+	text_ok_t text_ok[] = {
+		/* RFC 6742 section 4.1 examples. */
+		TEXT_VALID("10 14:4fff:ff20:ee64"),
+		TEXT_VALID_CHANGED("20 0015:5fff:ff21:ee65",
+				   "20 15:5fff:ff21:ee65"),
+		/* Preference out of range. */
+		TEXT_INVALID("65536 14:4fff:ff20:ee64"),
+		/* Wrong number of groups. */
+		TEXT_INVALID("10 14:4fff:ff20"),
+		TEXT_SENTINEL(),
+	};
+	wire_ok_t wire_ok[] = {
+		/* Preference + 64-bit Node ID == 10 octets. */
+		WIRE_VALID(0x00, 0x0a, 0x00, 0x14, 0x4f, 0xff, 0xff, 0x20, 0xee,
+			   0x64),
+		/* Too short. */
+		WIRE_INVALID(0x00, 0x0a, 0x00, 0x14, 0x4f, 0xff, 0xff, 0x20,
+			     0xee),
+		/* Too long. */
+		WIRE_INVALID(0x00, 0x0a, 0x00, 0x14, 0x4f, 0xff, 0xff, 0x20,
+			     0xee, 0x64, 0x00),
+		WIRE_SENTINEL(),
+	};
+
+	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
+		    dns_rdatatype_nid, sizeof(dns_rdata_nid_t));
 }
 
 /*
@@ -2604,6 +2726,115 @@ ISC_RUN_TEST_IMPL(rkey) {
 		    dns_rdatatype_rkey, sizeof(dns_rdata_rkey_t));
 }
 
+ISC_RUN_TEST_IMPL(rrsig) {
+	text_ok_t text_ok[] = {
+		TEXT_VALID("SOA 8 0 86400 20260426170000 20260413160000 54393 "
+			   ". "
+			   "tFbcoVP8MnpecUquJ/aj+XeNgV7ts9GSHVkXaXRJrJ/"
+			   "TEkOZApVG0F6E "
+			   "9sYpxGk2ItweLL43ujioGj0HWwZDRR+vbur+O/"
+			   "dIdheiig1VvU+9HXLi "
+			   "QOViY9Kc64ixdyJhYCC5K+bO1qsHxd+"
+			   "KJXOaxyHbqchYkDFy4PL6qftE "
+			   "VaLkueRgjXgOsq/"
+			   "NxvCXDgAa5xy0+3Sl0myxIs8rJ5KeXfJQFe7qxgaw "
+			   "VjJsJTKw8neOTw2rQfLaigWu2LIWw+"
+			   "IyVrLjZJdLqGkiLBGd1w4X3U12 "
+			   "fFxoY3eqzNgBEtduoGKPZ/"
+			   "NpP9cuKJORJ18283aV8hR4WO91VR0q1zcM jLwqUg=="),
+		/* labels too short for signer */
+		TEXT_INVALID("SOA 8 0 86400 20260426170000 20260413160000 "
+			     "54393 example. "
+			     "tFbcoVP8MnpecUquJ/aj+XeNgV7ts9GSHVkXaXRJrJ/"
+			     "TEkOZApVG0F6E "
+			     "9sYpxGk2ItweLL43ujioGj0HWwZDRR+vbur+O/"
+			     "dIdheiig1VvU+9HXLi "
+			     "QOViY9Kc64ixdyJhYCC5K+bO1qsHxd+"
+			     "KJXOaxyHbqchYkDFy4PL6qftE "
+			     "VaLkueRgjXgOsq/"
+			     "NxvCXDgAa5xy0+3Sl0myxIs8rJ5KeXfJQFe7qxgaw "
+			     "VjJsJTKw8neOTw2rQfLaigWu2LIWw+"
+			     "IyVrLjZJdLqGkiLBGd1w4X3U12 "
+			     "fFxoY3eqzNgBEtduoGKPZ/"
+			     "NpP9cuKJORJ18283aV8hR4WO91VR0q1zcM jLwqUg=="),
+		/*
+		 * Sentinel.
+		 */
+		TEXT_SENTINEL()
+	};
+	wire_ok_t wire_ok[] = {
+		WIRE_VALID(0x00, 0x06, 0x08, 0x00, 0x00, 0x01, 0x51, 0x80, 0x69,
+			   0xee, 0x44, 0x90, 0x69, 0xdd, 0x13, 0x00, 0xd4, 0x79,
+			   0x00, 0xb4, 0x56, 0xdc, 0xa1, 0x53, 0xfc, 0x32, 0x7a,
+			   0x5e, 0x71, 0x4a, 0xae, 0x27, 0xf6, 0xa3, 0xf9, 0x77,
+			   0x8d, 0x81, 0x5e, 0xed, 0xb3, 0xd1, 0x92, 0x1d, 0x59,
+			   0x17, 0x69, 0x74, 0x49, 0xac, 0x9f, 0xd3, 0x12, 0x43,
+			   0x99, 0x02, 0x95, 0x46, 0xd0, 0x5e, 0x84, 0xf6, 0xc6,
+			   0x29, 0xc4, 0x69, 0x36, 0x22, 0xdc, 0x1e, 0x2c, 0xbe,
+			   0x37, 0xba, 0x38, 0xa8, 0x1a, 0x3d, 0x07, 0x5b, 0x06,
+			   0x43, 0x45, 0x1f, 0xaf, 0x6e, 0xea, 0xfe, 0x3b, 0xf7,
+			   0x48, 0x76, 0x17, 0xa2, 0x8a, 0x0d, 0x55, 0xbd, 0x4f,
+			   0xbd, 0x1d, 0x72, 0xe2, 0x40, 0xe5, 0x62, 0x63, 0xd2,
+			   0x9c, 0xeb, 0x88, 0xb1, 0x77, 0x22, 0x61, 0x60, 0x20,
+			   0xb9, 0x2b, 0xe6, 0xce, 0xd6, 0xab, 0x07, 0xc5, 0xdf,
+			   0x8a, 0x25, 0x73, 0x9a, 0xc7, 0x21, 0xdb, 0xa9, 0xc8,
+			   0x58, 0x90, 0x31, 0x72, 0xe0, 0xf2, 0xfa, 0xa9, 0xfb,
+			   0x44, 0x55, 0xa2, 0xe4, 0xb9, 0xe4, 0x60, 0x8d, 0x78,
+			   0x0e, 0xb2, 0xaf, 0xcd, 0xc6, 0xf0, 0x97, 0x0e, 0x00,
+			   0x1a, 0xe7, 0x1c, 0xb4, 0xfb, 0x74, 0xa5, 0xd2, 0x6c,
+			   0xb1, 0x22, 0xcf, 0x2b, 0x27, 0x92, 0x9e, 0x5d, 0xf2,
+			   0x50, 0x15, 0xee, 0xea, 0xc6, 0x06, 0xb0, 0x56, 0x32,
+			   0x6c, 0x25, 0x32, 0xb0, 0xf2, 0x77, 0x8e, 0x4f, 0x0d,
+			   0xab, 0x41, 0xf2, 0xda, 0x8a, 0x05, 0xae, 0xd8, 0xb2,
+			   0x16, 0xc3, 0xe2, 0x32, 0x56, 0xb2, 0xe3, 0x64, 0x97,
+			   0x4b, 0xa8, 0x69, 0x22, 0x2c, 0x11, 0x9d, 0xd7, 0x0e,
+			   0x17, 0xdd, 0x4d, 0x76, 0x7c, 0x5c, 0x68, 0x63, 0x77,
+			   0xaa, 0xcc, 0xd8, 0x01, 0x12, 0xd7, 0x6e, 0xa0, 0x62,
+			   0x8f, 0x67, 0xf3, 0x69, 0x3f, 0xd7, 0x2e, 0x28, 0x93,
+			   0x91, 0x27, 0x5f, 0x36, 0xf3, 0x76, 0x95, 0xf2, 0x14,
+			   0x78, 0x58, 0xef, 0x75, 0x55, 0x1d, 0x2a, 0xd7, 0x37,
+			   0x0c, 0x8c, 0xbc, 0x2a, 0x52),
+		/* labels too short for signer */
+		WIRE_INVALID(
+			0x00, 0x06, 0x08, 0x00, 0x00, 0x01, 0x51, 0x80, 0x69,
+			0xee, 0x44, 0x90, 0x69, 0xdd, 0x13, 0x00, 0xd4, 0x79,
+			0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x00,
+			0xb4, 0x56, 0xdc, 0xa1, 0x53, 0xfc, 0x32, 0x7a, 0x5e,
+			0x71, 0x4a, 0xae, 0x27, 0xf6, 0xa3, 0xf9, 0x77, 0x8d,
+			0x81, 0x5e, 0xed, 0xb3, 0xd1, 0x92, 0x1d, 0x59, 0x17,
+			0x69, 0x74, 0x49, 0xac, 0x9f, 0xd3, 0x12, 0x43, 0x99,
+			0x02, 0x95, 0x46, 0xd0, 0x5e, 0x84, 0xf6, 0xc6, 0x29,
+			0xc4, 0x69, 0x36, 0x22, 0xdc, 0x1e, 0x2c, 0xbe, 0x37,
+			0xba, 0x38, 0xa8, 0x1a, 0x3d, 0x07, 0x5b, 0x06, 0x43,
+			0x45, 0x1f, 0xaf, 0x6e, 0xea, 0xfe, 0x3b, 0xf7, 0x48,
+			0x76, 0x17, 0xa2, 0x8a, 0x0d, 0x55, 0xbd, 0x4f, 0xbd,
+			0x1d, 0x72, 0xe2, 0x40, 0xe5, 0x62, 0x63, 0xd2, 0x9c,
+			0xeb, 0x88, 0xb1, 0x77, 0x22, 0x61, 0x60, 0x20, 0xb9,
+			0x2b, 0xe6, 0xce, 0xd6, 0xab, 0x07, 0xc5, 0xdf, 0x8a,
+			0x25, 0x73, 0x9a, 0xc7, 0x21, 0xdb, 0xa9, 0xc8, 0x58,
+			0x90, 0x31, 0x72, 0xe0, 0xf2, 0xfa, 0xa9, 0xfb, 0x44,
+			0x55, 0xa2, 0xe4, 0xb9, 0xe4, 0x60, 0x8d, 0x78, 0x0e,
+			0xb2, 0xaf, 0xcd, 0xc6, 0xf0, 0x97, 0x0e, 0x00, 0x1a,
+			0xe7, 0x1c, 0xb4, 0xfb, 0x74, 0xa5, 0xd2, 0x6c, 0xb1,
+			0x22, 0xcf, 0x2b, 0x27, 0x92, 0x9e, 0x5d, 0xf2, 0x50,
+			0x15, 0xee, 0xea, 0xc6, 0x06, 0xb0, 0x56, 0x32, 0x6c,
+			0x25, 0x32, 0xb0, 0xf2, 0x77, 0x8e, 0x4f, 0x0d, 0xab,
+			0x41, 0xf2, 0xda, 0x8a, 0x05, 0xae, 0xd8, 0xb2, 0x16,
+			0xc3, 0xe2, 0x32, 0x56, 0xb2, 0xe3, 0x64, 0x97, 0x4b,
+			0xa8, 0x69, 0x22, 0x2c, 0x11, 0x9d, 0xd7, 0x0e, 0x17,
+			0xdd, 0x4d, 0x76, 0x7c, 0x5c, 0x68, 0x63, 0x77, 0xaa,
+			0xcc, 0xd8, 0x01, 0x12, 0xd7, 0x6e, 0xa0, 0x62, 0x8f,
+			0x67, 0xf3, 0x69, 0x3f, 0xd7, 0x2e, 0x28, 0x93, 0x91,
+			0x27, 0x5f, 0x36, 0xf3, 0x76, 0x95, 0xf2, 0x14, 0x78,
+			0x58, 0xef, 0x75, 0x55, 0x1d, 0x2a, 0xd7, 0x37, 0x0c,
+			0x8c, 0xbc, 0x2a, 0x52),
+
+		WIRE_SENTINEL()
+	};
+	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
+		    dns_rdatatype_rrsig, sizeof(dns_rdata_rrsig_t));
+}
+
 ISC_RUN_TEST_IMPL(resinfo) {
 	text_ok_t text_ok[] = {
 		TEXT_VALID_CHANGED("qnamemin exterr=15,16,17 "
@@ -2700,6 +2931,41 @@ ISC_RUN_TEST_IMPL(sshfp) {
 
 	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
 		    dns_rdatatype_sshfp, sizeof(dns_rdata_sshfp_t));
+}
+
+ISC_RUN_TEST_IMPL(uri) {
+	text_ok_t text_ok[] = { /*
+				 * Too short.
+				 */
+				TEXT_INVALID(""), TEXT_INVALID("0"),
+				TEXT_INVALID("0 0"),
+				/*
+				 * An empty URI field is not permitted.
+				 */
+				TEXT_INVALID("0 0 \"\""),
+				/*
+				 * A non empty URI field.
+				 */
+				TEXT_VALID("0 0 \" \""), TEXT_SENTINEL()
+	};
+	wire_ok_t wire_ok[] = { /*
+				 * Too short.
+				 */
+				WIRE_INVALID(0x00), WIRE_INVALID(0x00, 0x00),
+				WIRE_INVALID(0x00, 0x00, 0x00),
+				/*
+				 * An empty URI field is not permitted.
+				 */
+				WIRE_INVALID(0x00, 0x00, 0x00, 0x00),
+				/*
+				 * A non empty URI field.
+				 */
+				WIRE_VALID(0x00, 0x00, 0x00, 0x00, 0x00),
+				WIRE_SENTINEL()
+	};
+
+	check_rdata(text_ok, wire_ok, NULL, false, dns_rdataclass_in,
+		    dns_rdatatype_uri, sizeof(dns_rdata_uri_t));
 }
 
 ISC_RUN_TEST_IMPL(wallet) {
@@ -3100,6 +3366,74 @@ ISC_RUN_TEST_IMPL(https_svcb) {
 }
 
 /*
+ * A raw NUL byte embedded in a quoted SvcParam value must be rejected
+ * with DNS_R_SYNTAX rather than silently truncated.  The dns_test_*
+ * helpers build the lexer input with strlen() and so cannot carry an
+ * embedded NUL, so parse an explicit-length buffer here directly.
+ */
+static void
+svcb_nullmsg(dns_rdatacallbacks_t *cb, const char *fmt, ...) {
+	UNUSED(cb);
+	UNUSED(fmt);
+}
+
+static void
+check_svcb_nulbyte(const unsigned char *data, size_t len) {
+	unsigned char buf[1024];
+	dns_rdata_t rdata = DNS_RDATA_INIT;
+	dns_rdatacallbacks_t callbacks;
+	isc_lexspecials_t specials = { 0 };
+	isc_buffer_t source, target;
+	isc_lex_t *lex = NULL;
+	isc_result_t result;
+
+	isc_buffer_constinit(&source, data, len);
+	isc_buffer_add(&source, len);
+
+	isc_lex_create(isc_g_mctx, 64, &lex);
+	specials['('] = 1;
+	specials[')'] = 1;
+	specials['"'] = 1;
+	isc_lex_setspecials(lex, specials);
+	isc_lex_setcomments(lex, ISC_LEXCOMMENT_DNSMASTERFILE);
+
+	result = isc_lex_openbuffer(lex, &source);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	isc_buffer_init(&target, buf, sizeof(buf));
+
+	dns_rdatacallbacks_init(&callbacks);
+	callbacks.warn = callbacks.error = svcb_nullmsg;
+
+	result = dns_rdata_fromtext(&rdata, dns_rdataclass_in,
+				    dns_rdatatype_svcb, lex, dns_rootname, 0,
+				    isc_g_mctx, &target, &callbacks);
+	assert_int_equal(result, DNS_R_SYNTAX);
+
+	isc_lex_destroy(&lex);
+}
+
+ISC_RUN_TEST_IMPL(https_svcb_nulbyte) {
+	/* port="53\0..." must not parse as port 53. */
+	const unsigned char port[] = "1 svc.example.net. port=\"53\0x\"\n";
+	/* ech="<valid-base64>\0..." must not parse as the truncated prefix. */
+	const unsigned char ech[] = "1 svc.example.net. ech=\"abcd\0efgh\"\n";
+	/* ipv4hint="1.2.3.4\0..." must not parse as 1.2.3.4. */
+	const unsigned char ipv4[] = "1 svc.example.net. "
+				     "ipv4hint=\"1.2.3.4\0x\"\n";
+	/* ipv6hint="2001:db8::1\0..." must not parse as 2001:db8::1. */
+	const unsigned char ipv6[] = "1 svc.example.net. "
+				     "ipv6hint=\"2001:db8::1\0x\"\n";
+
+	UNUSED(state);
+
+	check_svcb_nulbyte(port, sizeof(port) - 1);
+	check_svcb_nulbyte(ech, sizeof(ech) - 1);
+	check_svcb_nulbyte(ipv4, sizeof(ipv4) - 1);
+	check_svcb_nulbyte(ipv6, sizeof(ipv6) - 1);
+}
+
+/*
  * ZONEMD tests.
  *
  * Excerpted from RFC 8976:
@@ -3355,6 +3689,115 @@ ISC_RUN_TEST_IMPL(zonemd) {
 		    dns_rdatatype_zonemd, sizeof(dns_rdata_zonemd_t));
 }
 
+/*
+ * Compression pointers are only permitted in the rdata of the types
+ * defined in RFC 1035, and of the older types that RFC 3597 section 4
+ * asks receivers to decompress: RP, AFSDB, RT, SIG, PX, NXT, NAPTR and
+ * SRV. Each type's fromwire handler sets the policy for its own rdata,
+ * so unless the caller passes DNS_DECOMPRESS_ALWAYS, a pointer in any
+ * other type is rejected with DNS_R_DISALLOWED. Exercise this for MX,
+ * for each of the RFC 3597 types, and for a disallowed type (DNAME),
+ * with a context that arrives with compression permitted, to show that
+ * the policy is set per type rather than inherited from the caller.
+ *
+ * Each wire buffer starts with the name "example.com." at offset 0
+ * so every 0xc0 0x00 compression pointer in the rdata refers back to
+ * a syntactically valid name. Parsing of the rdata starts at the
+ * OWNER_LEN offset.
+ */
+ISC_RUN_TEST_IMPL(decompression_permitted) {
+#define OWNER 0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00
+	static const size_t OWNER_LEN = 13;
+	static const unsigned char mx_wire[] = {
+		OWNER, 0x00, 0x0a, /* preference */
+		0xc0,  0x00,	   /* exchange: pointer */
+	};
+	static const unsigned char rp_wire[] = {
+		OWNER, 0xc0, 0x00, /* mbox: pointer */
+		0xc0,  0x00,	   /* txt: pointer */
+	};
+	static const unsigned char afsdb_wire[] = {
+		OWNER, 0x00, 0x01, /* subtype */
+		0xc0,  0x00,	   /* hostname: pointer */
+	};
+	static const unsigned char rt_wire[] = {
+		OWNER, 0x00, 0x0a, /* preference */
+		0xc0,  0x00,	   /* intermediate host: pointer */
+	};
+	static const unsigned char sig_wire[] = {
+		OWNER, 0x00, 0x01, 0x08, 0x02, /* covered/algorithm/labels */
+		0x00,  0x00, 0x0e, 0x10,       /* original TTL */
+		0x00,  0x00, 0x00, 0x00,       /* expiration */
+		0x00,  0x00, 0x00, 0x00,       /* inception */
+		0x00,  0x01,		       /* key tag */
+		0xc0,  0x00,		       /* signer: pointer */
+		0x01,			       /* signature */
+	};
+	static const unsigned char px_wire[] = {
+		OWNER, 0x00, 0x0a, /* preference */
+		0xc0,  0x00,	   /* MAP822: pointer */
+		0xc0,  0x00,	   /* MAPX400: pointer */
+	};
+	/* next domain: pointer */
+	static const unsigned char nxt_wire[] = { OWNER, 0xc0, 0x00 };
+	static const unsigned char naptr_wire[] = {
+		OWNER, 0x00, 0x0a, 0x00, 0x14, /* order/preference */
+		0x00,  0x00, 0x00,	       /* flags/service/regexp */
+		0xc0,  0x00,		       /* replacement: pointer */
+	};
+	static const unsigned char srv_wire[] = {
+		OWNER, 0x00, 0x0a, 0x00,
+		0x14,  0x00, 0x50, /* priority/weight/port */
+		0xc0,  0x00,	   /* target: pointer */
+	};
+	/* target: pointer */
+	static const unsigned char dname_wire[] = { OWNER, 0xc0, 0x00 };
+#undef OWNER
+
+	const struct {
+		const unsigned char *wire;
+		size_t wire_len;
+		dns_rdatatype_t type;
+		isc_result_t expected;
+	} cases[] = {
+		{ mx_wire, sizeof(mx_wire), dns_rdatatype_mx, ISC_R_SUCCESS },
+		{ rp_wire, sizeof(rp_wire), dns_rdatatype_rp, ISC_R_SUCCESS },
+		{ afsdb_wire, sizeof(afsdb_wire), dns_rdatatype_afsdb,
+		  ISC_R_SUCCESS },
+		{ rt_wire, sizeof(rt_wire), dns_rdatatype_rt, ISC_R_SUCCESS },
+		{ sig_wire, sizeof(sig_wire), dns_rdatatype_sig,
+		  ISC_R_SUCCESS },
+		{ px_wire, sizeof(px_wire), dns_rdatatype_px, ISC_R_SUCCESS },
+		{ nxt_wire, sizeof(nxt_wire), dns_rdatatype_nxt,
+		  ISC_R_SUCCESS },
+		{ naptr_wire, sizeof(naptr_wire), dns_rdatatype_naptr,
+		  ISC_R_SUCCESS },
+		{ srv_wire, sizeof(srv_wire), dns_rdatatype_srv,
+		  ISC_R_SUCCESS },
+		{ dname_wire, sizeof(dname_wire), dns_rdatatype_dname,
+		  DNS_R_DISALLOWED },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		isc_buffer_t source, target;
+		unsigned char buf[256];
+		dns_rdata_t rdata = DNS_RDATA_INIT;
+		isc_result_t result;
+
+		isc_buffer_constinit(&source, cases[i].wire, cases[i].wire_len);
+		isc_buffer_add(&source, cases[i].wire_len);
+		isc_buffer_forward(&source, OWNER_LEN);
+		isc_buffer_setactive(&source, cases[i].wire_len - OWNER_LEN);
+
+		isc_buffer_init(&target, buf, sizeof(buf));
+
+		result = dns_rdata_fromwire(&rdata, dns_rdataclass_in,
+					    cases[i].type, &source,
+					    DNS_DECOMPRESS_PERMITTED, &target);
+		assert_int_equal(result, cases[i].expected);
+	}
+}
+
 ISC_RUN_TEST_IMPL(atcname) {
 	unsigned int i;
 
@@ -3363,7 +3806,6 @@ ISC_RUN_TEST_IMPL(atcname) {
 		bool tf = dns_rdatatype_atcname((dns_rdatatype_t)i);
 		switch (i) {
 		case dns_rdatatype_nsec:
-		case dns_rdatatype_key:
 		case dns_rdatatype_rrsig:
 			if (!tf) {
 				print_message(UNR, i);
@@ -3414,7 +3856,6 @@ ISC_RUN_TEST_IMPL(iszonecutauth) {
 		case dns_rdatatype_ns:
 		case dns_rdatatype_ds:
 		case dns_rdatatype_nsec:
-		case dns_rdatatype_key:
 		case dns_rdatatype_rrsig:
 			if (!tf) {
 				print_message(UNR, i);
@@ -3432,6 +3873,55 @@ ISC_RUN_TEST_IMPL(iszonecutauth) {
 #undef UNR
 }
 
+/*
+ * Check that DHCID multiline text output includes the trailing
+ * comment with the identifier type, digest type and digest length
+ * ("<base64> ) ; 2 1 6" for the wire data below).
+ */
+ISC_RUN_TEST_IMPL(dhcid_multiline) {
+	unsigned char wire[] = {
+		0x00, 0x02, 0x01, 'c', 'o', 'f', 'f', 'e', 'e'
+	};
+
+	isc_region_t region = { .base = wire, .length = sizeof(wire) };
+	isc_buffer_t target;
+	isc_result_t result;
+	dns_rdata_t rdata = DNS_RDATA_INIT;
+	char buf[128];
+
+	dns_rdata_fromregion(&rdata, dns_rdataclass_in, dns_rdatatype_dhcid,
+			     &region);
+
+	isc_buffer_init(&target, buf, sizeof(buf) - 1);
+	result = dns_rdata_tofmttext(&rdata, NULL, DNS_STYLEFLAG_MULTILINE, 80,
+				     80, "\n", &target);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	buf[isc_buffer_usedlength(&target)] = '\0';
+
+	assert_string_equal(buf, "( AAIBY29mZmVl ) ; 2 1 6");
+}
+
+/*
+ * dns_secalg_format() must NUL-terminate without overflowing or
+ * aborting, including when the mnemonic exactly fills the buffer
+ * and when it does not fit at all.
+ */
+ISC_RUN_TEST_IMPL(secalg_format) {
+	char no_nul_space[sizeof("RSASHA256") - 1];
+	char exact[sizeof("RSASHA256")];
+	char small[5];
+
+	dns_secalg_format(DNS_KEYALG_RSASHA256, exact, sizeof(exact));
+	assert_string_equal(exact, "RSASHA256");
+
+	dns_secalg_format(DNS_KEYALG_RSASHA256, no_nul_space,
+			  sizeof(no_nul_space));
+	assert_string_equal(no_nul_space, "");
+
+	dns_secalg_format(DNS_KEYALG_RSASHA256, small, sizeof(small));
+	assert_string_equal(small, "");
+}
+
 ISC_TEST_LIST_START
 
 /* types */
@@ -3441,6 +3931,7 @@ ISC_TEST_ENTRY(atma)
 ISC_TEST_ENTRY(brid)
 ISC_TEST_ENTRY(cdnskey)
 ISC_TEST_ENTRY(csync)
+ISC_TEST_ENTRY(dhcid_multiline)
 ISC_TEST_ENTRY(dnskey)
 ISC_TEST_ENTRY(doa)
 ISC_TEST_ENTRY(ds)
@@ -3449,16 +3940,22 @@ ISC_TEST_ENTRY(eid)
 ISC_TEST_ENTRY(hhit)
 ISC_TEST_ENTRY(hip)
 ISC_TEST_ENTRY(https_svcb)
+ISC_TEST_ENTRY(https_svcb_nulbyte)
 ISC_TEST_ENTRY(isdn)
 ISC_TEST_ENTRY(key)
+ISC_TEST_ENTRY(l32)
+ISC_TEST_ENTRY(l64)
 ISC_TEST_ENTRY(loc)
+ISC_TEST_ENTRY(nid)
 ISC_TEST_ENTRY(nimloc)
 ISC_TEST_ENTRY(nsec)
 ISC_TEST_ENTRY(nsec3)
 ISC_TEST_ENTRY(nxt)
 ISC_TEST_ENTRY(resinfo)
 ISC_TEST_ENTRY(rkey)
+ISC_TEST_ENTRY(rrsig)
 ISC_TEST_ENTRY(sshfp)
+ISC_TEST_ENTRY(uri)
 ISC_TEST_ENTRY(wallet)
 ISC_TEST_ENTRY(wks)
 ISC_TEST_ENTRY(zonemd)
@@ -3466,9 +3963,11 @@ ISC_TEST_ENTRY(zonemd)
 /* other tests */
 ISC_TEST_ENTRY(edns_client_subnet)
 ISC_TEST_ENTRY(edns_rad)
+ISC_TEST_ENTRY(decompression_permitted)
 ISC_TEST_ENTRY(atcname)
 ISC_TEST_ENTRY(atparent)
 ISC_TEST_ENTRY(iszonecutauth)
+ISC_TEST_ENTRY(secalg_format)
 ISC_TEST_LIST_END
 
 ISC_TEST_MAIN

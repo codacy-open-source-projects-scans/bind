@@ -1,75 +1,94 @@
-"""
-Copyright (C) Internet Systems Consortium, Inc. ("ISC")
-
-SPDX-License-Identifier: MPL-2.0
-
-This Source Code Form is subject to the terms of the Mozilla Public
-License, v. 2.0.  If a copy of the MPL was not distributed with this
-file, you can obtain one at https://mozilla.org/MPL/2.0/.
-
-See the COPYRIGHT file distributed with this work for additional
-information regarding copyright ownership.
-"""
+# Copyright (C) Internet Systems Consortium, Inc. ("ISC")
+#
+# SPDX-License-Identifier: MPL-2.0
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, you can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# See the COPYRIGHT file distributed with this work for additional
+# information regarding copyright ownership.
 
 from collections.abc import AsyncGenerator
 
 import dns.name
 import dns.rcode
+import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 
 from isctest.asyncserver import (
     ControllableAsyncDnsServer,
-    DnsResponseSend,
     QueryContext,
-    ResponseAction,
     ResponseHandler,
-    ToggleResponsesCommand,
 )
+from isctest.asyncserver.actions import DnsResponseSend
+from isctest.asyncserver.commands import ToggleResponsesCommand
+from isctest.asyncserver.handlers import StaticResponseHandler
+from isctest.asyncserver.matchers import Domain, Qname, Qtype
+
+SLD = "sld.tld."
+NS1 = f"ns1.{SLD}"
 
 
-class ChaseDsHandler(ResponseHandler):
+def rrset(
+    owner: dns.name.Name | str, rdtype: dns.rdatatype.RdataType, rdata: str
+) -> dns.rrset.RRset:
+    return dns.rrset.from_text(owner, 300, dns.rdataclass.IN, rdtype, rdata)
+
+
+def a(owner: dns.name.Name | str) -> dns.rrset.RRset:
+    return rrset(owner, dns.rdatatype.A, "10.53.0.2")
+
+
+def aaaa(owner: dns.name.Name | str) -> dns.rrset.RRset:
+    return rrset(owner, dns.rdatatype.AAAA, "fd92:7065:b8e:ffff::2")
+
+
+def ns(owner: dns.name.Name | str) -> dns.rrset.RRset:
+    return rrset(owner, dns.rdatatype.NS, NS1)
+
+
+def soa(owner: dns.name.Name | str) -> dns.rrset.RRset:
+    return rrset(owner, dns.rdatatype.SOA, ". . 0 0 0 0 0")
+
+
+class Ns1AHandler(StaticResponseHandler):
+    matcher = Qname(NS1) & Qtype(dns.rdatatype.A)
+    answer = [a(NS1)]
+    edns = None
+
+
+class Ns1AaaaHandler(StaticResponseHandler):
+    matcher = Qname(NS1) & Qtype(dns.rdatatype.AAAA)
+    answer = [aaaa(NS1)]
+    edns = None
+
+
+class SldDelegationHandler(ResponseHandler):
     """
-    Yield responses triggering DS chasing logic in `named`.  These responses
-    cannot be served from a static zone file because most of them need to be
-    generated dynamically so that the owner name of the returned RRset is
-    copied from the QNAME sent by the client:
-
-      - A/AAAA queries for `ns1.sld.tld.` elicit responses with IP addresses,
-      - all NS queries below `sld.tld.` elicit a delegation to `ns1.sld.tld.`,
-      - all other queries elicit a negative response with a common SOA record.
+    Delegate every NS query at or below sld.tld. to ns1.sld.tld., copying the
+    owner name from the QNAME.  Together with Ns1AHandler / Ns1AaaaHandler
+    (which resolve the delegated nameserver) and NegativeSoaHandler (the
+    negative catch-all), this drives named's DS-chasing logic.
     """
+
+    matcher = Domain(SLD) & Qtype(dns.rdatatype.NS)
 
     async def get_responses(
         self, qctx: QueryContext
-    ) -> AsyncGenerator[ResponseAction, None]:
-        ns1_sld_tld = dns.name.from_text("ns1.sld.tld.")
-        sld_tld = dns.name.from_text("sld.tld.")
-
-        if qctx.qname == ns1_sld_tld and qctx.qtype == dns.rdatatype.A:
-            response_type = dns.rdatatype.A
-            response_rdata = "10.53.0.2"
-            response_section = qctx.response.answer
-        elif qctx.qname == ns1_sld_tld and qctx.qtype == dns.rdatatype.AAAA:
-            response_type = dns.rdatatype.AAAA
-            response_rdata = "fd92:7065:b8e:ffff::2"
-            response_section = qctx.response.answer
-        elif qctx.qname.is_subdomain(sld_tld) and qctx.qtype == dns.rdatatype.NS:
-            response_type = dns.rdatatype.NS
-            response_rdata = "ns1.sld.tld."
-            response_section = qctx.response.answer
-        else:
-            response_type = dns.rdatatype.SOA
-            response_rdata = ". . 0 0 0 0 0"
-            response_section = qctx.response.authority
-
+    ) -> AsyncGenerator[DnsResponseSend, None]:
         qctx.response.use_edns(None)
+        qctx.response.answer.append(ns(qctx.qname))
+        yield DnsResponseSend(qctx.response)
 
-        response_rrset = dns.rrset.from_text(
-            qctx.qname, 300, qctx.qclass, response_type, response_rdata
-        )
-        response_section.append(response_rrset)
 
+class NegativeSoaHandler(ResponseHandler):
+    async def get_responses(
+        self, qctx: QueryContext
+    ) -> AsyncGenerator[DnsResponseSend, None]:
+        qctx.response.use_edns(None)
+        qctx.response.authority.append(soa(qctx.qname))
         yield DnsResponseSend(qctx.response)
 
 
@@ -78,7 +97,12 @@ def main() -> None:
         default_rcode=dns.rcode.NOERROR, default_aa=True
     )
     server.install_control_command(ToggleResponsesCommand())
-    server.install_response_handler(ChaseDsHandler())
+    server.install_response_handlers(
+        Ns1AHandler(),
+        Ns1AaaaHandler(),
+        SldDelegationHandler(),
+        NegativeSoaHandler(),
+    )
     server.run()
 
 

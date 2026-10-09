@@ -88,20 +88,18 @@ typedef struct MDB_env MDB_env;
 
 struct dns_view {
 	/* Unlocked. */
-	unsigned int	     magic;
-	isc_mem_t	    *mctx;
-	dns_rdataclass_t     rdclass;
-	char		    *name;
-	dns_zt_t	    *zonetable;
-	dns_resolver_t	    *resolver;
-	dns_adb_t	    *adb;
-	dns_requestmgr_t    *requestmgr;
-	dns_dispatchmgr_t   *dispatchmgr;
-	dns_cache_t	    *cache;
-	dns_db_t	    *cachedb;
-	dns_db_t	    *rootdb;
-	atomic_uint_fast32_t rootdb_expires;
-	dns_delegdb_t	    *deleg;
+	unsigned int	   magic;
+	isc_mem_t	  *mctx;
+	dns_rdataclass_t   rdclass;
+	char		  *name;
+	dns_zt_t	  *zonetable;
+	dns_resolver_t	  *resolver;
+	dns_adb_t	  *adb;
+	dns_requestmgr_t  *requestmgr;
+	dns_dispatchmgr_t *dispatchmgr;
+	dns_cache_t	  *cache;
+	dns_db_t	  *cachedb;
+	dns_delegdb_t	  *deleg;
 
 	/*
 	 * security roots and negative trust anchors.
@@ -420,28 +418,6 @@ dns_view_setcache(dns_view_t *view, dns_cache_t *cache, bool shared);
  */
 
 void
-dns_view_setrootdb(dns_view_t *view, dns_db_t *rootdb);
-/*%<
- * Set the view's root delegation database.
- *
- * This seeds the rootdb at cold start from a root hints file; it is then
- * overwritten by the resolver when priming succeeds (see
- * dns_resolver_prime()).  Callers consult the rootdb via dns_view_find()
- * and bestzonecut to obtain the root NS set regardless of TTL.
- *
- * Requires:
- *
- *\li	'view' is a valid, unfrozen view, whose root database has not been
- *	set.
- *
- *\li	'rootdb' is a valid zone database.
- *
- * Ensures:
- *
- * \li    	The root database of 'view' is 'rootdb'.
- */
-
-void
 dns_view_settransports(dns_view_t *view, dns_transport_list_t *list);
 
 void
@@ -547,9 +523,8 @@ dns_view_thaw(dns_view_t *view);
 
 isc_result_t
 dns_view_find(dns_view_t *view, const dns_name_t *name, dns_rdatatype_t type,
-	      isc_stdtime_t now, unsigned int options, bool use_hints,
-	      bool use_static_stub, dns_db_t **dbp, dns_dbnode_t **nodep,
-	      dns_name_t *foundname, dns_rdataset_t *rdataset,
+	      isc_stdtime_t now, unsigned int options, bool use_static_stub,
+	      dns_db_t **dbp, dns_name_t *foundname, dns_rdataset_t *rdataset,
 	      dns_rdataset_t *sigrdataset);
 /*%<
  * Find an rdataset whose owner name is 'name', and whose type is
@@ -571,12 +546,6 @@ dns_view_find(dns_view_t *view, const dns_name_t *name, dns_rdatatype_t type,
  *	better answer.
  *
  *\li	If 'now' is zero, then the current time will be used.
- *
- *\li	If 'use_hints' is true, and the view has a hints database, then
- *	it will be searched last.  If the answer is found in the hints
- *	database, the result code will be DNS_R_HINT.  If the name is found
- *	in the hints database but not the type, the result code will be
- *	#DNS_R_HINTNXRRSET.
  *
  *\li	If 'use_static_stub' is false and the longest match zone for 'name'
  *	is a static-stub zone, it's ignored and the cache and/or hints will be
@@ -611,8 +580,6 @@ dns_view_find(dns_view_t *view, const dns_name_t *name, dns_rdatatype_t type,
  *
  *\li	dbp == NULL || *dbp == NULL
  *
- *\li	nodep == NULL || *nodep == NULL.  If nodep != NULL, dbp != NULL.
- *
  *\li	'foundname' is a valid name with a dedicated buffer or NULL.
  *
  *\li	'rdataset' is a valid, disassociated rdataset.
@@ -626,8 +593,6 @@ dns_view_find(dns_view_t *view, const dns_name_t *name, dns_rdatatype_t type,
  *
  *\li	If dbp != NULL, it points to the database containing the data.
  *
- *\li	If nodep != NULL, it points to the database node containing the data.
- *
  *\li	If foundname != NULL, it contains the full name of the found data.
  *
  * Returns:
@@ -639,8 +604,8 @@ dns_view_find(dns_view_t *view, const dns_name_t *name, dns_rdatatype_t type,
 isc_result_t
 dns_view_simplefind(dns_view_t *view, const dns_name_t *name,
 		    dns_rdatatype_t type, isc_stdtime_t now,
-		    unsigned int options, bool use_hints,
-		    dns_rdataset_t *rdataset, dns_rdataset_t *sigrdataset);
+		    unsigned int options, dns_rdataset_t *rdataset,
+		    dns_rdataset_t *sigrdataset);
 /*%<
  * Find an rdataset whose owner name is 'name', and whose type is
  * 'type'.
@@ -656,12 +621,6 @@ dns_view_simplefind(dns_view_t *view, const dns_name_t *name,
  *	and 'type' are appropriate for glue retrieval.
  *
  *\li	If 'now' is zero, then the current time will be used.
- *
- *\li	If 'use_hints' is true, and the view has a hints database, then
- *	it will be searched last.  If the answer is found in the hints
- *	database, the result code will be DNS_R_HINT.  If the name is found
- *	in the hints database but not the type, the result code will be
- *	DNS_R_HINTNXRRSET.
  *
  *\li	If 'sigrdataset' is not NULL, and there is a SIG rdataset which
  *	covers 'type', then 'sigrdataset' will be bound to it.
@@ -858,10 +817,9 @@ isc_result_t
 dns_view_flushcache(dns_view_t *view, bool fixuponly);
 /*%<
  * Flush the view's cache (and ADB).  If 'fixuponly' is true, it only updates
- * the internal reference to the cache DB with omitting actual flush operation.
+ * the internal reference to the cache DB, omitting actual flush operation.
  * 'fixuponly' is intended to be used for a view that shares a cache with
- * a different view.  dns_view_flushcache() is a backward compatible version
- * that always sets fixuponly to false.
+ * a different view.
  *
  * Requires:
  * 	'view' is valid.

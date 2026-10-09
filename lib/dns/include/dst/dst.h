@@ -101,7 +101,6 @@ typedef enum dst_algorithm {
 	 */
 	DST_ALG_HMACMD5 = 157,
 	DST_ALG_HMAC_FIRST = DST_ALG_HMACMD5,
-	DST_ALG_GSSAPI = 160,	  /* Internal use only. Exception. */
 	DST_ALG_HMACSHA1 = 161,	  /* XXXMPA */
 	DST_ALG_HMACSHA224 = 162, /* XXXMPA */
 	DST_ALG_HMACSHA256 = 163, /* XXXMPA */
@@ -118,17 +117,13 @@ typedef enum dst_algorithm {
 	 */
 	DST_ALG_RSASHA256PRIVATEOID = 256, /* 1.2.840.113549.1.1.11 */
 	DST_ALG_RSASHA512PRIVATEOID = 257, /* 1.2.840.113549.1.1.13 */
-	DST_MAX_ALGS = 258,
+#ifdef TEST_PRIVATEDNS
+	DST_ALG_RSASHA256PRIVATEDNS = 258, /* rsasha256.example.org. */
+	DST_ALG_RSASHA512PRIVATEDNS = 259, /* rsasha512.example.org. */
+#endif
+	DST_ALG_GSSAPI = 260, /* Internal use only. */
+	DST_MAX_ALGS = 261,
 } dst_algorithm_t;
-
-/*% A buffer of this size is large enough to hold any key */
-#define DST_KEY_MAXSIZE 1280
-
-/*%
- * A buffer of this size is large enough to hold the textual representation
- * of any key
- */
-#define DST_KEY_MAXTEXTSIZE 2048
 
 /*% 'Type' for dst_read_key() */
 #define DST_TYPE_KEY	  0x1000000 /* KEY key */
@@ -227,6 +222,16 @@ dst_algorithm_supported(unsigned int alg);
  * \li	false
  */
 
+bool
+dst_dnssec_algorithm(unsigned int alg);
+/*%<
+ * Can this DST algorithm be use for DNSSEC validation.
+ *
+ * Returns:
+ * \li	true
+ * \li	false
+ */
+
 dst_algorithm_t
 dst_algorithm_fromprivateoid(isc_buffer_t *buffer);
 /*
@@ -235,10 +240,13 @@ dst_algorithm_fromprivateoid(isc_buffer_t *buffer);
  */
 
 dst_algorithm_t
-dst_algorithm_fromprivatedns(isc_buffer_t *buf);
+dst_algorithm_fromprivatedns(isc_buffer_t *buffer);
 /*
  * Extract the dst algorithm identifier that matches
  * the DNS name found at the start of 'buffer'.
+ *
+ * The active region needs to be set on 'buffer' as
+ * dns_name_fromwire is called.
  */
 
 bool
@@ -1283,7 +1291,7 @@ dst_algorithm_fromdata(dns_secalg_t algorithm, unsigned char *data,
 		       unsigned int length);
 /*%<
  * If 'algorithm' is PRIVATEOID or PRIVATEDNS, extract the DNSSEC private
- * algorithm encoded at the begining of data and return the DST algorithm
+ * algorithm encoded at the beginning of data and return the DST algorithm
  * number that corresponds to it; if the algorithm is unknown to DST,
  * return 0.
  *

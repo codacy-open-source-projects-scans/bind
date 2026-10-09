@@ -237,6 +237,8 @@ dst__lib_initialize(void) {
 
 void
 dst__lib_shutdown(void) {
+	dst__opensslrsa_shutdown();
+
 	isc_mem_detach(&dst__mctx);
 }
 
@@ -245,6 +247,18 @@ dst_algorithm_supported(unsigned int alg) {
 	if (alg >= DST_MAX_ALGS || dst_t_func[alg] == NULL) {
 		return false;
 	}
+	return true;
+}
+
+bool
+dst_dnssec_algorithm(unsigned int alg) {
+	if ((alg == DST_ALG_DH) || (alg == DST_ALG_INDIRECT) ||
+	    (alg == DST_ALG_GSSAPI) ||
+	    (alg >= DST_ALG_HMAC_FIRST && alg <= DST_ALG_HMAC_LAST))
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -385,9 +399,7 @@ dst_key_tofile(const dst_key_t *key, int type, const char *directory) {
 		RETERR(write_key_state(key, type, directory));
 	}
 
-	if (((type & DST_TYPE_PRIVATE) != 0) &&
-	    (key->key_flags & DNS_KEYFLAG_TYPEMASK) != DNS_KEYTYPE_NOKEY)
-	{
+	if ((type & DST_TYPE_PRIVATE) != 0) {
 		return key->func->tofile(key, directory);
 	}
 	return ISC_R_SUCCESS;
@@ -459,7 +471,7 @@ isc_result_t
 dst_key_fromfile(dns_name_t *name, dns_keytag_t id, unsigned int alg, int type,
 		 const char *directory, isc_mem_t *mctx, dst_key_t **keyp) {
 	isc_result_t result;
-	char filename[NAME_MAX];
+	char filename[NAME_MAX + 1];
 	isc_buffer_t buf;
 	dst_key_t *key;
 
@@ -472,7 +484,7 @@ dst_key_fromfile(dns_name_t *name, dns_keytag_t id, unsigned int alg, int type,
 
 	key = NULL;
 
-	isc_buffer_init(&buf, filename, NAME_MAX);
+	isc_buffer_init(&buf, filename, sizeof(filename));
 	CHECK(dst_key_getfilename(name, id, alg, type, NULL, mctx, &buf));
 	CHECK(dst_key_fromnamedfile(filename, directory, type, mctx, &key));
 	CHECK(computeid(key));
@@ -551,9 +563,7 @@ dst_key_fromnamedfile(const char *filename, const char *dirname, int type,
 		CHECK(result);
 	}
 
-	if ((type & (DST_TYPE_PRIVATE | DST_TYPE_PUBLIC)) == DST_TYPE_PUBLIC ||
-	    (pubkey->key_flags & DNS_KEYFLAG_TYPEMASK) == DNS_KEYTYPE_NOKEY)
-	{
+	if ((type & (DST_TYPE_PRIVATE | DST_TYPE_PUBLIC)) == DST_TYPE_PUBLIC) {
 		CHECK(computeid(pubkey));
 		pubkey->modified = false;
 		*keyp = pubkey;
@@ -652,15 +662,7 @@ dst_key_todns(const dst_key_t *key, isc_buffer_t *target) {
 	isc_buffer_putuint8(target,
 			    (uint8_t)dst_algorithm_tosecalg(key->key_alg));
 
-	if ((key->key_flags & DNS_KEYFLAG_EXTENDED) != 0) {
-		if (isc_buffer_availablelength(target) < 2) {
-			return ISC_R_NOSPACE;
-		}
-		isc_buffer_putuint16(
-			target, (uint16_t)((key->key_flags >> 16) & 0xffff));
-	}
-
-	if (key->keydata.generic == NULL) { /*%< NULL KEY */
+	if (key->keydata.generic == NULL) {
 		return ISC_R_SUCCESS;
 	}
 
@@ -671,7 +673,7 @@ isc_result_t
 dst_key_fromdns(const dns_name_t *name, dns_rdataclass_t rdclass,
 		isc_buffer_t *source, isc_mem_t *mctx, dst_key_t **keyp) {
 	uint8_t alg, proto;
-	uint32_t flags, extflags;
+	uint32_t flags;
 	dst_key_t *key = NULL;
 	dns_keytag_t id, rid;
 	isc_region_t r;
@@ -687,14 +689,6 @@ dst_key_fromdns(const dns_name_t *name, dns_rdataclass_t rdclass,
 
 	id = dst_region_computeid(&r);
 	rid = dst_region_computerid(&r);
-
-	if ((flags & DNS_KEYFLAG_EXTENDED) != 0) {
-		if (isc_buffer_remaininglength(source) < 2) {
-			return DST_R_INVALIDPUBLICKEY;
-		}
-		extflags = isc_buffer_getuint16(source);
-		flags |= (extflags << 16);
-	}
 
 	RETERR(frombuffer(name, alg, flags, proto, rdclass, source, mctx,
 			  &key));
@@ -925,12 +919,6 @@ dst_key_generate(const dns_name_t *name, unsigned int alg, unsigned int bits,
 
 	if (label != NULL) {
 		key->label = isc_mem_strdup(mctx, label);
-	}
-
-	if (bits == 0) { /*%< NULL KEY */
-		key->key_flags |= DNS_KEYTYPE_NOKEY;
-		*keyp = key;
-		return ISC_R_SUCCESS;
 	}
 
 	if (key->func->generate == NULL) {
@@ -1179,7 +1167,7 @@ comparekeys(const dst_key_t *key1, const dst_key_t *key2,
 static bool
 pub_compare(const dst_key_t *key1, const dst_key_t *key2) {
 	isc_result_t result;
-	unsigned char buf1[DST_KEY_MAXSIZE], buf2[DST_KEY_MAXSIZE];
+	unsigned char buf1[DNS_RDATA_MAXLENGTH], buf2[DNS_RDATA_MAXLENGTH];
 	isc_buffer_t b1, b2;
 	isc_region_t r1, r2;
 
@@ -1190,9 +1178,6 @@ pub_compare(const dst_key_t *key1, const dst_key_t *key2) {
 	}
 	/* Zero out flags. */
 	buf1[0] = buf1[1] = 0;
-	if ((key1->key_flags & DNS_KEYFLAG_EXTENDED) != 0) {
-		isc_buffer_subtract(&b1, 2);
-	}
 
 	isc_buffer_init(&b2, buf2, sizeof(buf2));
 	result = dst_key_todns(key2, &b2);
@@ -1201,23 +1186,9 @@ pub_compare(const dst_key_t *key1, const dst_key_t *key2) {
 	}
 	/* Zero out flags. */
 	buf2[0] = buf2[1] = 0;
-	if ((key2->key_flags & DNS_KEYFLAG_EXTENDED) != 0) {
-		isc_buffer_subtract(&b2, 2);
-	}
 
 	isc_buffer_usedregion(&b1, &r1);
-	/* Remove extended flags. */
-	if ((key1->key_flags & DNS_KEYFLAG_EXTENDED) != 0) {
-		memmove(&buf1[4], &buf1[6], r1.length - 6);
-		r1.length -= 2;
-	}
-
 	isc_buffer_usedregion(&b2, &r2);
-	/* Remove extended flags. */
-	if ((key2->key_flags & DNS_KEYFLAG_EXTENDED) != 0) {
-		memmove(&buf2[4], &buf2[6], r2.length - 6);
-		r2.length -= 2;
-	}
 	return isc_region_compare(&r1, &r2) == 0;
 }
 
@@ -1466,7 +1437,7 @@ dst_key_setinactive(dst_key_t *key, bool inactive) {
 isc_result_t
 dst_key_read_public(const char *filename, int type, isc_mem_t *mctx,
 		    dst_key_t **keyp) {
-	u_char rdatabuf[DST_KEY_MAXSIZE];
+	uint8_t rdatabuf[DNS_RDATA_MAXLENGTH];
 	isc_buffer_t b;
 	dns_fixedname_t name;
 	isc_lex_t *lex = NULL;
@@ -1486,7 +1457,7 @@ dst_key_read_public(const char *filename, int type, isc_mem_t *mctx,
 	 * <algorithm> <key>
 	 */
 
-	/* 1500 should be large enough for any key */
+	/* Initial token size; the lexer grows it on demand. */
 	isc_lex_create(mctx, 1500, &lex);
 
 	memset(specials, 0, sizeof(specials));
@@ -1514,8 +1485,7 @@ dst_key_read_public(const char *filename, int type, isc_mem_t *mctx,
 	dns_fixedname_init(&name);
 	isc_buffer_init(&b, DST_AS_STR(token), strlen(DST_AS_STR(token)));
 	isc_buffer_add(&b, strlen(DST_AS_STR(token)));
-	CHECK(dns_name_fromtext(dns_fixedname_name(&name), &b, dns_rootname,
-				0));
+	CHECK(dns_name_fromtext(dns_name(&name), &b, dns_rootname, 0));
 
 	/* Read the next word: either TTL, class, or 'KEY' */
 	NEXTTOKEN(lex, opt, &token);
@@ -1562,8 +1532,7 @@ dst_key_read_public(const char *filename, int type, isc_mem_t *mctx,
 	CHECK(dns_rdata_fromtext(&rdata, rdclass, keytype, lex, NULL, false,
 				 mctx, &b, NULL));
 
-	CHECK(dst_key_fromdns(dns_fixedname_name(&name), rdclass, &b, mctx,
-			      keyp));
+	CHECK(dst_key_fromdns(dns_name(&name), rdclass, &b, mctx, keyp));
 
 	dst_key_setttl(*keyp, ttl);
 
@@ -1733,7 +1702,8 @@ dst_key_read_state(const char *filename, isc_mem_t *mctx, dst_key_t **keyp) {
 				BADTOKEN();
 			}
 
-			CHECK(dns_time32_fromtext(DST_AS_STR(token), &when));
+			CHECK(dns_time32_fromregion(token.value.as_textregion,
+						    &when));
 
 			dst_key_settime(*keyp, tag, when);
 			goto next;
@@ -1883,8 +1853,8 @@ write_key_state(const dst_key_t *key, int type, const char *directory) {
 	FILE *fp;
 	isc_buffer_t fileb;
 	isc_buffer_t tmpb;
-	char filename[NAME_MAX];
-	char tmpname[NAME_MAX];
+	char filename[NAME_MAX + 1];
+	char tmpname[NAME_MAX + 1];
 	isc_result_t result;
 
 	REQUIRE(VALID_KEY(key));
@@ -1965,10 +1935,14 @@ write_public_key(const dst_key_t *key, int type, const char *directory) {
 	FILE *fp;
 	isc_buffer_t keyb, tmpb, textb, fileb, classb;
 	isc_region_t r;
-	char tmpname[NAME_MAX];
-	char filename[NAME_MAX];
-	unsigned char key_array[DST_KEY_MAXSIZE];
-	char text_array[DST_KEY_MAXTEXTSIZE];
+	char tmpname[NAME_MAX + 1];
+	char filename[NAME_MAX + 1];
+	unsigned char key_array[DNS_RDATA_MAXLENGTH];
+	/*
+	 * Big enough for the base64 expansion of the key data with
+	 * whitespace separators, plus the other rdata fields.
+	 */
+	char text_array[DNS_RDATA_MAXLENGTH * 2];
 	char class_array[10];
 	isc_result_t result;
 	dns_rdata_t rdata = DNS_RDATA_INIT;
@@ -2110,7 +2084,7 @@ buildfilename(dns_name_t *name, dns_keytag_t id, unsigned int alg,
 static isc_result_t
 computeid(dst_key_t *key) {
 	isc_buffer_t dnsbuf;
-	unsigned char dns_array[DST_KEY_MAXSIZE];
+	unsigned char dns_array[DNS_RDATA_MAXLENGTH];
 	isc_region_t r;
 
 	isc_buffer_init(&dnsbuf, dns_array, sizeof(dns_array));
@@ -2136,6 +2110,7 @@ frombuffer(const dns_name_t *name, unsigned int alg, unsigned int flags,
 
 	if (alg == DNS_KEYALG_PRIVATEDNS) {
 		isc_buffer_t b = *source;
+		isc_buffer_setactive(&b, isc_buffer_remaininglength(&b));
 		alg = dst_algorithm_fromprivatedns(&b);
 		if (alg == 0) {
 			return DST_R_UNSUPPORTEDALG;
@@ -2150,14 +2125,11 @@ frombuffer(const dns_name_t *name, unsigned int alg, unsigned int flags,
 		}
 	}
 
+	RETERR(algorithm_status(alg));
+
 	key = get_key_struct(name, alg, flags, protocol, 0, rdclass, 0, mctx);
 
 	if (isc_buffer_remaininglength(source) > 0) {
-		result = algorithm_status(alg);
-		if (result != ISC_R_SUCCESS) {
-			dst_key_free(&key);
-			return result;
-		}
 		if (key->func->fromdns == NULL) {
 			dst_key_free(&key);
 			return DST_R_UNSUPPORTEDALG;
@@ -2640,6 +2612,10 @@ dst_algorithm_tosecalg(dst_algorithm_t dst_alg) {
 	static dns_secalg_t dns_alg[DST_MAX_ALGS] = {
 		[DST_ALG_RSASHA256PRIVATEOID] = DNS_KEYALG_PRIVATEOID,
 		[DST_ALG_RSASHA512PRIVATEOID] = DNS_KEYALG_PRIVATEOID,
+#if TEST_PRIVATEDNS
+		[DST_ALG_RSASHA256PRIVATEDNS] = DNS_KEYALG_PRIVATEDNS,
+		[DST_ALG_RSASHA512PRIVATEDNS] = DNS_KEYALG_PRIVATEDNS,
+#endif
 	};
 
 	if (dst_alg < 256) {
@@ -2670,7 +2646,7 @@ dst_algorithm_fromprivatedns(isc_buffer_t *buffer) {
 	dns_name_t *name = dns_fixedname_initname(&fixed);
 	isc_result_t result;
 
-	result = dns_name_fromwire(name, buffer, DNS_DECOMPRESS_DEFAULT, NULL);
+	result = dns_name_fromwire(name, buffer, DNS_DECOMPRESS_NEVER, NULL);
 	if (result != ISC_R_SUCCESS) {
 		return 0;
 	}
@@ -2737,6 +2713,7 @@ dst_algorithm_fromdata(dns_secalg_t algorithm, unsigned char *data,
 	case DNS_KEYALG_PRIVATEDNS:
 		isc_buffer_init(&b, data, length);
 		isc_buffer_add(&b, length);
+		isc_buffer_setactive(&b, length);
 		return dst_algorithm_fromprivatedns(&b);
 	case DNS_KEYALG_PRIVATEOID:
 		isc_buffer_init(&b, data, length);

@@ -67,13 +67,13 @@ synthrecord_reverseanswer(synthrecord_t *inst, isc_netaddr_t *na,
 	REQUIRE(na->family == AF_INET || na->family == AF_INET6);
 
 	isc_buffer_init(&b, bdata, sizeof(bdata));
-	isc_buffer_copyregion(&b, &inst->prefix);
+	RETERR(isc_buffer_copyregion(&b, &inst->prefix));
 
 	isc_buffer_init(&addrb, addrbdata, sizeof(addrbdata));
 	RETERR(isc_netaddr_totext(na, &addrb));
 
 	/*
-	 * IDN compatibility, as an IPv6 begining or ending with `::` will be
+	 * IDN compatibility, as an IPv6 beginning or ending with `::` will be
 	 * converted into `--` and RFC5890 section 2.3.1 states that an IDN
 	 * label can't start or end with an hyphen.
 	 */
@@ -86,6 +86,9 @@ synthrecord_reverseanswer(synthrecord_t *inst, isc_netaddr_t *na,
 		 */
 		isc_buffer_peekuint8(&addrb, &c);
 		if (c == ':') {
+			if (isc_buffer_availablelength(&b) == 0) {
+				return ISC_R_NOSPACE;
+			}
 			isc_buffer_putuint8(&b, '0');
 		}
 
@@ -96,12 +99,15 @@ synthrecord_reverseanswer(synthrecord_t *inst, isc_netaddr_t *na,
 		isc_buffer_forward(&addrb, isc_buffer_usedlength(&addrb) - 1);
 		isc_buffer_peekuint8(&addrb, &c);
 		if (c == ':') {
+			if (isc_buffer_availablelength(&b) == 0) {
+				return ISC_R_NOSPACE;
+			}
 			isc_buffer_putuint8(&addrb, '0');
 		}
 	}
 
 	isc_buffer_usedregion(&addrb, &addrr);
-	isc_buffer_copyregion(&b, &addrr);
+	RETERR(isc_buffer_copyregion(&b, &addrr));
 
 	/*
 	 * Do not attempt to replace anything in the prefix
@@ -116,9 +122,8 @@ static isc_result_t
 synthrecord_respond(synthrecord_t *inst, query_ctx_t *qctx, void *rdata,
 		    dns_rdatatype_t rtype) {
 	isc_result_t result;
-	isc_mem_t *mctx = qctx->client->inner.view->mctx;
 	dns_message_t *msg = qctx->client->message;
-	dns_name_t aname = DNS_NAME_INITEMPTY;
+	dns_linkedname_t *aname = NULL;
 	dns_rdataset_t *synthset = NULL;
 	dns_rdatalist_t *synthlist = NULL;
 	dns_rdata_t *synthdata = NULL;
@@ -130,8 +135,9 @@ synthrecord_respond(synthrecord_t *inst, query_ctx_t *qctx, void *rdata,
 	 */
 	dns_message_gettemprdata(msg, &synthdata);
 	isc_buffer_init(&synthdatab, synthdatabdata, sizeof(synthdatabdata));
-	CHECK(dns_rdata_fromstruct(synthdata, dns_rdataclass_in, rtype, rdata,
-				   &synthdatab));
+	result = dns_rdata_fromstruct(synthdata, dns_rdataclass_in, rtype,
+				      rdata, &synthdatab);
+	INSIST(result == ISC_R_SUCCESS);
 
 	/*
 	 * Reference synthdata from the rdatalist
@@ -152,10 +158,11 @@ synthrecord_respond(synthrecord_t *inst, query_ctx_t *qctx, void *rdata,
 	 * Then create the name in the ANSWER section and attach the
 	 * rdataset to it.
 	 */
-	dns_name_dup(qctx->client->query.qname, mctx, &aname);
-	dns_message_addname(msg, &aname, DNS_SECTION_ANSWER);
-	dns_rdataset_setownercase(synthset, &aname);
-	ISC_LIST_APPEND(aname.list, synthset, link);
+	dns_message_gettempname(msg, &aname);
+	dns_name_copy(qctx->client->query.qname, dns_name(aname));
+	dns_message_addname(msg, aname, DNS_SECTION_ANSWER);
+	dns_rdataset_setownercase(synthset, dns_name(aname));
+	ISC_LIST_APPEND(aname->list, synthset, link);
 
 	/*
 	 * Send the message with the ANSWER section containing the
@@ -164,21 +171,11 @@ synthrecord_respond(synthrecord_t *inst, query_ctx_t *qctx, void *rdata,
 	result = ns_query_done(qctx);
 
 	/*
-	 * Message is gone now, let's free message response datastructures
+	 * Message is gone now, intermediate data borrowed from the message
+	 * (name, rdataset, etc.) are automatically released internally. (See
+	 * comment in `lib/dns/message.h` regarding `dns_message_gettemp*()` API
+	 * usage.)
 	 */
-	dns_message_removename(msg, &aname, DNS_SECTION_ANSWER);
-	ISC_LIST_UNLINK(aname.list, synthset, link);
-	dns_name_free(&aname, mctx);
-
-	dns_rdataset_disassociate(synthset);
-	dns_message_puttemprdataset(msg, &synthset);
-
-	ISC_LIST_UNLINK(synthlist->rdata, synthdata, link);
-	dns_message_puttemprdatalist(msg, &synthlist);
-
-cleanup:
-	dns_message_puttemprdata(msg, &synthdata);
-
 	return result;
 }
 
@@ -214,6 +211,13 @@ synthrecord_parseforward(synthrecord_t *inst, const dns_name_t *name,
 
 	isc_buffer_init(&b, bdata, sizeof(bdata));
 	dns_name_totext(&label, DNS_NAME_OMITFINALDOT, &b);
+
+	/*
+	 * Buffer is `DNS_NAME_FORMATSIZE` which is the maximum length of
+	 * `dns_name_totext()` can put in there, plus one byte which we're
+	 * setting here. So we know there is at least one remaining byte in the
+	 * buffer.
+	 */
 	isc_buffer_putuint8(&b, 0);
 	if (strncmp((const char *)inst->prefix.base, isc_buffer_base(&b),
 		    inst->prefix.length) != 0)
@@ -250,7 +254,7 @@ static ns_hookresult_t
 synthrecord_forward(synthrecord_t *inst, query_ctx_t *qctx,
 		    isc_result_t *resp) {
 	isc_netaddr_t addr;
-	const dns_name_t *qname = qctx->client->query.qname;
+	const dns_name_t *qname = dns_name(qctx->client->query.qname);
 
 	*resp = ISC_R_UNSET;
 
@@ -315,7 +319,7 @@ synthrecord_reverse(synthrecord_t *inst, query_ctx_t *qctx,
 	char anamebdata[DNS_NAME_FORMATSIZE];
 	isc_buffer_t anameb;
 	isc_netaddr_t qaddr;
-	const dns_name_t *qname = qctx->client->query.qname;
+	const dns_name_t *qname = dns_name(qctx->client->query.qname);
 	dns_rdata_ptr_t synthptrdata;
 
 	*resp = ISC_R_UNSET;
@@ -360,7 +364,7 @@ synthrecord_reverse(synthrecord_t *inst, query_ctx_t *qctx,
 	}
 
 	synthptrdata = (dns_rdata_ptr_t){
-		.mctx = qctx->client->inner.view->mctx, .ptr = aname
+		.ptr = aname,
 	};
 	DNS_RDATACOMMON_INIT(&synthptrdata, dns_rdatatype_ptr,
 			     dns_rdataclass_in);
@@ -499,7 +503,8 @@ synthrecord_parseallowsynth(synthrecord_t *inst, const cfg_obj_t *cfg,
 	result = cfg_map_get(synthrecordcfg, "allow-synth", &obj);
 
 	if (result == ISC_R_NOTFOUND) {
-		return dns_acl_any(inst->mctx, &inst->allowedsynth);
+		dns_acl_any(inst->mctx, &inst->allowedsynth);
+		return ISC_R_SUCCESS;
 	}
 
 	if (result != ISC_R_SUCCESS) {
@@ -597,7 +602,6 @@ plugin_register(const char *parameters, const void *cfg, const char *cfgfile,
 	*instp = inst;
 
 	isc_mem_attach(mctx, &inst->mctx);
-	result = ISC_R_SUCCESS;
 	result = synthrecord_parseconfig(inst, parameters, cfg, cfgfile,
 					 cfgline, aclctx, ctx->origin);
 

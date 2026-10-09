@@ -1,4 +1,3 @@
-############################################################################
 # Copyright (C) Internet Systems Consortium, Inc. ("ISC")
 #
 # SPDX-License-Identifier: MPL-2.0
@@ -9,7 +8,6 @@
 #
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
-############################################################################
 
 import glob
 import os
@@ -63,7 +61,7 @@ is_full_backport = is_backport and "Backport::Partial" not in mr_labels
 
 gl = gitlab.Gitlab(
     url=f"https://{os.environ['CI_SERVER_HOST']}",
-    private_token=os.environ["BIND_TEAM_API_TOKEN"],
+    private_token=os.environ["DANGER_GITLAB_API_TOKEN"],
 )
 proj = gl.projects.get(os.environ["CI_PROJECT_ID"])
 mr = proj.mergerequests.get(os.environ["CI_MERGE_REQUEST_IID"])
@@ -156,6 +154,69 @@ if match:
 PROHIBITED_WORDS_RE = re.compile(
     "^(WIP|wip|DROP|drop|DROPME|checkpoint|experiment|TODO|todo)[^a-zA-Z]"
 )
+# Names of well-known AI coding assistants.  CONTRIBUTING.md forbids
+# them from being listed in `Co-Authored-By` or `Signed-off-by`
+# trailers; contributors must use the `Assisted-by` trailer instead.
+LLM_AGENT_NAMES_RE = (
+    r"\b("
+    r"claude|anthropic|"
+    r"codex|openai|chatgpt|gpt-[0-9]|"
+    r"mistral|"
+    r"copilot|"
+    r"gemini|bard|"
+    r"cursor|"
+    r"devin|cognition|"
+    r"aider|"
+    r"sourcegraph|"
+    r"codewhisperer"
+    r")\b"
+)
+LLM_COAUTHORED_BY_RE = re.compile(
+    r"^Co-Authored-By:.*" + LLM_AGENT_NAMES_RE,
+    re.IGNORECASE | re.MULTILINE,
+)
+LLM_SIGNED_OFF_BY_RE = re.compile(
+    r"^Signed-off-by:.*" + LLM_AGENT_NAMES_RE,
+    re.IGNORECASE | re.MULTILINE,
+)
+# The `Claude-Session` trailer added by Claude Code is not allowed in
+# BIND 9 commit messages.
+CLAUDE_SESSION_TRAILER_RE = re.compile(
+    r"^Claude-Session:", re.IGNORECASE | re.MULTILINE
+)
+COAUTHORED_BY_RE = re.compile(r"^Co-Authored-By:.*$", re.IGNORECASE | re.MULTILINE)
+# A trailer pointing at an @isc.org address is a human co-author; there
+# is no point in asking for confirmation.
+HUMAN_COAUTHORED_BY_RE = re.compile(
+    r"^Co-Authored-By:\s+.*<[^<>@\s]+@isc\.org>$", re.IGNORECASE
+)
+# CONTRIBUTING.md documents the trailer format as
+# `Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL1] [TOOL2]`.  Match every
+# `Assisted-by:` line, then check it against the expected shape.
+ASSISTED_BY_RE = re.compile(r"^Assisted-by:.*$", re.IGNORECASE | re.MULTILINE)
+ASSISTED_BY_VALID_RE = re.compile(
+    r"^Assisted-by:\s+\S+:\S+(?:\s+\S+)*\s*$", re.IGNORECASE
+)
+# Basic development tools that CONTRIBUTING.md excludes from the optional
+# `[TOOL ...]` portion of the Assisted-by trailer.  Combines the examples
+# given in CONTRIBUTING.md (git, compilers, meson, ninja, editors,
+# clang-format, black, ruff) with other formatters, generic linters, and
+# build/test runners commonly invoked by .gitlab-ci.yml.  Specialized
+# analysis tools (coccinelle, clang-tidy, AFL, cppcheck,
+# valgrind, sanitizers) are intentionally absent.
+ASSISTED_BY_BASIC_TOOL_RE = re.compile(
+    r"\b("
+    r"git|"
+    r"gcc|g\+\+|clang|clang\+\+|cc|"
+    r"meson|ninja|make|cmake|autoconf|automake|libtool|"
+    r"vim|emacs|"
+    r"clang-format|black|ruff|pylint|mypy|flake8|pyflakes|"
+    r"pytest|danger|"
+    r"shellcheck|"
+    r"sphinx"
+    r")\b",
+    re.IGNORECASE,
+)
 fixup_error_logged = False
 for commit in danger.git.commits:
     message_lines = commit.message.splitlines()
@@ -178,6 +239,64 @@ for commit in danger.git.commits:
             f"Prohibited keyword `{match.groups()[0]}` detected "
             f"at the start of a subject line in commit {commit.sha}."
         )
+    match = LLM_COAUTHORED_BY_RE.search(commit.message)
+    if match:
+        fail(
+            f"Commit {commit.sha} contains a `Co-Authored-By` trailer "
+            f"naming an AI tool (`{match.group(1)}`). Per `CONTRIBUTING.md`, "
+            "AI agents are not co-authors and must not be listed with "
+            "`Co-Authored-By`. Use the `Assisted-by:` trailer instead "
+            "(e.g. `Assisted-by: Claude:claude-opus-4-7`)."
+        )
+    else:
+        for coauthor_line in COAUTHORED_BY_RE.findall(commit.message):
+            if HUMAN_COAUTHORED_BY_RE.match(coauthor_line.strip()):
+                continue
+            message(
+                f"Commit {commit.sha} contains a `Co-Authored-By` trailer: "
+                f"```{coauthor_line}```. Ensure the named co-author is a "
+                "human contributor.  AI tools must use the `Assisted-by:` "
+                "trailer instead."
+            )
+    match = LLM_SIGNED_OFF_BY_RE.search(commit.message)
+    if match:
+        fail(
+            f"Commit {commit.sha} contains a `Signed-off-by` trailer "
+            f"naming an AI tool (`{match.group(1)}`). Per `CONTRIBUTING.md`, "
+            "only humans can legally certify the Developer Certificate of "
+            "Origin; AI agents must not add `Signed-off-by` tags. Use the "
+            "`Assisted-by:` trailer instead."
+        )
+    if CLAUDE_SESSION_TRAILER_RE.search(commit.message):
+        fail(
+            f"Commit {commit.sha} contains a `Claude-Session` trailer, "
+            "which is not allowed. Remove it."
+        )
+    for assisted_line in ASSISTED_BY_RE.findall(commit.message):
+        if not ASSISTED_BY_VALID_RE.match(assisted_line):
+            warn(
+                f"Commit {commit.sha} has a malformed `Assisted-by` trailer: "
+                f"```{assisted_line}```. `CONTRIBUTING.md` documents the "
+                "format as `Assisted-by: AGENT_NAME:MODEL_VERSION "
+                "[TOOL1] [TOOL2]` (e.g. "
+                "`Assisted-by: Claude:claude-opus-4-7 coccinelle`)."
+            )
+            continue
+        # Split off the optional tool list (everything after AGENT:VERSION).
+        parts = assisted_line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        basic_tools = ASSISTED_BY_BASIC_TOOL_RE.findall(parts[2])
+        if basic_tools:
+            warn(
+                f"Commit {commit.sha} lists basic development tool(s) "
+                f"({', '.join(basic_tools)}) in its `Assisted-by` trailer. "
+                "Per `CONTRIBUTING.md`, basic dev tools (git, compilers, "
+                "build systems, editors, formatters, generic linters, "
+                "etc.) should not be listed.  Only specialized analysis "
+                "tools (e.g. coccinelle, clang-tidy, AFL) "
+                "belong in the trailer."
+            )
     match = MR_TITLE_RE.match(subject)
     if match and match.group(5) is not None and not is_merge:
         fail(
@@ -281,25 +400,28 @@ if is_backport:
         else:  # check for commit IDs once original MR is merged
             original_mr_commits = list(original_mr.commits(all=True))
             backport_mr_commits = list(mr.commits(all=True))
-            for orig_commit in original_mr_commits:
-                for backport_commit in backport_mr_commits:
-                    if orig_commit.id in backport_commit.message:
-                        break
+            missing_commits = []
+            for orig_id in (o.id for o in original_mr_commits):
+                if not any(b for b in backport_mr_commits if orig_id in b.message):
+                    missing_commits.append(orig_id)
+            if missing_commits:
+                msg = (
+                    f"The following commits from original MR !{original_mr_id} "
+                    "are not referenced in any of the backport commits:"
+                )
+                msg += "<ul>"
+                msg += "".join(f"<li>{orig_id}</li>" for orig_id in missing_commits)
+                msg += "</ul>"
+                if not is_full_backport:
+                    message(msg)
                 else:
-                    msg = (
-                        f"Commit {orig_commit.id} from original MR !{original_mr_id} "
-                        "is not referenced in any of the backport commits."
+                    msg += (
+                        "Please use `-x` when cherry-picking to include "
+                        "the full original commit ID. Alternatively, use the "
+                        "`Backport::Partial` label if not all original "
+                        "commits are meant to be backported."
                     )
-                    if not is_full_backport:
-                        message(msg)
-                    else:
-                        msg += (
-                            " Please use `-x` when cherry-picking to include "
-                            "the full original commit ID. Alternately, use the "
-                            "`Backport::Partial` label if not all original "
-                            "commits are meant to be backported."
-                        )
-                        fail(msg)
+                    fail(msg)
 else:
     if not version_labels:
         fail(
@@ -418,25 +540,6 @@ if switches_added:
     )
 
 ###############################################################################
-# PRE-RELEASE TESTING
-###############################################################################
-#
-# WARN if the merge request is marked with the "Security" label, but not with
-# the label used for marking merge requests for pre-release testing (if the
-# latter is defined by the relevant environment variable).
-
-pre_release_testing_label = os.getenv("PRE_RELEASE_TESTING_LABEL")
-if (
-    pre_release_testing_label
-    and "Security" in mr_labels
-    and pre_release_testing_label not in mr_labels
-):
-    warn(
-        "This merge request is marked with the *Security* label, but it is not "
-        f"marked for pre-release testing (*{pre_release_testing_label}*)."
-    )
-
-###############################################################################
 # USER-VISIBLE LOG LEVELS
 ###############################################################################
 #
@@ -463,7 +566,7 @@ for log_level in user_visible_log_levels:
 # SYSTEM TEST FILES
 ###############################################################################
 #
-# FAIL if newly added system test directory contains an underscore (invalid char)
+# FAIL if newly added system test directory contains a hyphen (invalid char)
 # FAIL if there are no pytest files in the system test directory
 # FAIL if the pytest glue file for tests.sh is missing
 
@@ -494,7 +597,7 @@ for testname in testnames:
             "`tests_*.py` pytest file."
         )
     tests_sh_exists = os.path.exists(f"{dirpath}/tests.sh")
-    glue_file_name = f"tests_sh_{testname.replace('-', '_')}.py"
+    glue_file_name = f"tests_sh_{testname}.py"
     tests_sh_py_exists = os.path.exists(f"{dirpath}/{glue_file_name}")
     if tests_sh_exists and not tests_sh_py_exists:
         fail(

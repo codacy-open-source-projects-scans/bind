@@ -20,6 +20,8 @@
 
 #include <isc/buffer.h>
 #include <isc/file.h>
+#include <isc/hash.h>
+#include <isc/hashmap.h>
 #include <isc/log.h>
 #include <isc/mem.h>
 #include <isc/result.h>
@@ -93,11 +95,11 @@ dns_difftuple_create(isc_mem_t *mctx, dns_diffop_t op, const dns_name_t *name,
 
 void
 dns_difftuple_free(dns_difftuple_t **tp) {
-	dns_difftuple_t *t = *tp;
-	*tp = NULL;
 	isc_mem_t *mctx;
 
-	REQUIRE(DNS_DIFFTUPLE_VALID(t));
+	REQUIRE(tp != NULL && DNS_DIFFTUPLE_VALID(*tp));
+
+	dns_difftuple_t *t = MOVE_OWNERSHIP(*tp);
 
 	dns_name_invalidate(&t->name);
 	t->magic = 0;
@@ -108,6 +110,9 @@ dns_difftuple_free(dns_difftuple_t **tp) {
 
 void
 dns_difftuple_copy(dns_difftuple_t *orig, dns_difftuple_t **copyp) {
+	REQUIRE(DNS_DIFFTUPLE_VALID(orig));
+	REQUIRE(copyp != NULL && *copyp == NULL);
+
 	dns_difftuple_create(orig->mctx, orig->op, &orig->name, orig->ttl,
 			     &orig->rdata, copyp);
 }
@@ -134,22 +139,43 @@ dns_diff_clear(dns_diff_t *diff) {
 void
 dns_diff_append(dns_diff_t *diff, dns_difftuple_t **tuplep) {
 	REQUIRE(DNS_DIFF_VALID(diff));
-	ISC_LIST_APPEND(diff->tuples, *tuplep, link);
+	REQUIRE(tuplep != NULL && DNS_DIFFTUPLE_VALID(*tuplep));
+
+	dns_difftuple_t *tuple = MOVE_OWNERSHIP(*tuplep);
+	ISC_LIST_APPEND(diff->tuples, tuple, link);
 	diff->size += 1;
-	*tuplep = NULL;
 }
 
-bool
-dns_diff_is_boundary(const dns_diff_t *diff, dns_name_t *new_name) {
+void
+dns_diff_prepend(dns_diff_t *diff, dns_difftuple_t **tuplep) {
 	REQUIRE(DNS_DIFF_VALID(diff));
-	REQUIRE(DNS_NAME_VALID(new_name));
+	REQUIRE(tuplep != NULL && DNS_DIFFTUPLE_VALID(*tuplep));
 
-	if (ISC_LIST_EMPTY(diff->tuples)) {
-		return false;
-	}
+	dns_difftuple_t *tuple = MOVE_OWNERSHIP(*tuplep);
+	ISC_LIST_PREPEND(diff->tuples, tuple, link);
+	diff->size += 1;
+}
 
-	dns_difftuple_t *tail = ISC_LIST_TAIL(diff->tuples);
-	return !dns_name_caseequal(&tail->name, new_name);
+void
+dns_diff_appendlist(dns_diff_t *dst, dns_diff_t *src) {
+	REQUIRE(DNS_DIFF_VALID(dst));
+	REQUIRE(DNS_DIFF_VALID(src));
+	REQUIRE(dst != src);
+
+	ISC_LIST_APPENDLIST(dst->tuples, src->tuples, link);
+	dst->size += src->size;
+	src->size = 0;
+	ENSURE(ISC_LIST_EMPTY(src->tuples));
+}
+
+void
+dns_diff_unlink(dns_diff_t *diff, dns_difftuple_t *tuple) {
+	REQUIRE(DNS_DIFF_VALID(diff));
+	REQUIRE(DNS_DIFFTUPLE_VALID(tuple));
+	REQUIRE(diff->size > 0);
+
+	ISC_LIST_UNLINK(diff->tuples, tuple, link);
+	diff->size -= 1;
 }
 
 size_t
@@ -158,12 +184,21 @@ dns_diff_size(const dns_diff_t *diff) {
 	return diff->size;
 }
 
+static bool
+minimal_match(void *node, const void *key) {
+	const dns_difftuple_t *a = node;
+	const dns_difftuple_t *b = key;
+
+	return dns_name_caseequal(&a->name, &b->name) &&
+	       dns_rdata_compare(&a->rdata, &b->rdata) == 0 && a->ttl == b->ttl;
+}
+
 /* XXX this is O(N) */
 
 void
 dns_diff_appendminimal(dns_diff_t *diff, dns_difftuple_t **tuplep) {
 	REQUIRE(DNS_DIFF_VALID(diff));
-	REQUIRE(DNS_DIFFTUPLE_VALID(*tuplep));
+	REQUIRE(tuplep != NULL && DNS_DIFFTUPLE_VALID(*tuplep));
 
 	/*
 	 * Look for an existing tuple with the same owner name,
@@ -178,10 +213,7 @@ dns_diff_appendminimal(dns_diff_t *diff, dns_difftuple_t **tuplep) {
 	 * error.  We report it but try to continue anyway.
 	 */
 	ISC_LIST_FOREACH(diff->tuples, ot, link) {
-		if (dns_name_caseequal(&ot->name, &(*tuplep)->name) &&
-		    dns_rdata_compare(&ot->rdata, &(*tuplep)->rdata) == 0 &&
-		    ot->ttl == (*tuplep)->ttl)
-		{
+		if (minimal_match(ot, *tuplep)) {
 			ISC_LIST_UNLINK(diff->tuples, ot, link);
 			INSIST(diff->size > 0);
 			diff->size -= 1;
@@ -197,10 +229,88 @@ dns_diff_appendminimal(dns_diff_t *diff, dns_difftuple_t **tuplep) {
 	}
 
 	if (*tuplep != NULL) {
-		ISC_LIST_APPEND(diff->tuples, *tuplep, link);
-		diff->size += 1;
-		*tuplep = NULL;
+		dns_diff_append(diff, tuplep);
 	}
+}
+
+static uint8_t
+minimal_hashbits(size_t count) {
+	uint8_t bits = 4;
+
+	/* Leave room for the hash map's 90% load threshold. */
+	while (bits < 24 && count > (((size_t)9 << bits) / 10)) {
+		bits++;
+	}
+
+	return bits;
+}
+
+static uint32_t
+minimal_hash(const dns_difftuple_t *tuple) {
+	isc_hash32_t hash;
+
+	isc_hash32_init(&hash);
+	dns_name_hash_ex(&hash, &tuple->name);
+	isc_hash32_hash(&hash, &tuple->rdata.rdclass,
+			sizeof(tuple->rdata.rdclass), true);
+	isc_hash32_hash(&hash, &tuple->rdata.type, sizeof(tuple->rdata.type),
+			true);
+	isc_hash32_hash(&hash, tuple->rdata.data, tuple->rdata.length, false);
+	isc_hash32_hash(&hash, &tuple->ttl, sizeof(tuple->ttl), true);
+
+	return isc_hash32_finalize(&hash);
+}
+
+void
+dns_diff_appendlistminimal(dns_diff_t *diff, dns_diff_t *source) {
+	isc_hashmap_t *index = NULL;
+	isc_result_t result;
+
+	REQUIRE(DNS_DIFF_VALID(diff));
+	REQUIRE(DNS_DIFF_VALID(source));
+	REQUIRE(diff != source);
+
+	dns_diff_appendlist(diff, source);
+
+	isc_hashmap_create(diff->mctx, minimal_hashbits(diff->size), &index);
+
+	ISC_LIST_FOREACH(diff->tuples, tuple, link) {
+		dns_difftuple_t *found = NULL;
+		uint32_t hashval = minimal_hash(tuple);
+
+		result = isc_hashmap_add(index, hashval, minimal_match, tuple,
+					 tuple, (void **)&found);
+
+		switch (result) {
+		case ISC_R_SUCCESS:
+			break;
+
+		case ISC_R_EXISTS:
+			INSIST(found != NULL);
+
+			if (found->op == tuple->op) {
+				UNEXPECTED_ERROR("unexpected non-minimal diff");
+				dns_diff_unlink(diff, tuple);
+				dns_difftuple_free(&tuple);
+			} else {
+				result = isc_hashmap_delete(
+					index, hashval, minimal_match, found);
+				INSIST(result == ISC_R_SUCCESS);
+
+				dns_diff_unlink(diff, found);
+				dns_diff_unlink(diff, tuple);
+
+				dns_difftuple_free(&found);
+				dns_difftuple_free(&tuple);
+			}
+			break;
+
+		default:
+			UNREACHABLE();
+		}
+	}
+
+	isc_hashmap_destroy(&index);
 }
 
 static void
@@ -723,4 +833,50 @@ cleanup:
 		isc_mem_put(diff->mctx, mem, size);
 	}
 	return result;
+}
+
+isc_result_t
+dns_diff_applytuple(dns_difftuple_t **tuplep, dns_db_t *db,
+		    dns_dbversion_t *ver, dns_diff_t *diff) {
+	dns_diff_t temp_diff;
+	isc_result_t result;
+
+	REQUIRE(DNS_DIFF_VALID(diff));
+	REQUIRE(tuplep != NULL && DNS_DIFFTUPLE_VALID(*tuplep));
+	dns_difftuple_t *tuple = MOVE_OWNERSHIP(*tuplep);
+
+	/*
+	 * Create a singleton diff.
+	 */
+	dns_diff_init(diff->mctx, &temp_diff);
+	dns_diff_append(&temp_diff, &tuple);
+
+	/*
+	 * Apply it to the database.
+	 */
+	result = dns_diff_apply(&temp_diff, db, ver);
+
+	/*
+	 * Retrieve the tuple from the 'temp_diff' so we can
+	 * add it to 'diff' on success or free it.
+	 */
+	tuple = ISC_LIST_HEAD(temp_diff.tuples);
+	dns_diff_unlink(&temp_diff, tuple);
+
+	/*
+	 * This should be a no-op.
+	 */
+	dns_diff_clear(&temp_diff);
+
+	if (result != ISC_R_SUCCESS) {
+		dns_difftuple_free(&tuple);
+		return result;
+	}
+
+	/*
+	 * Merge it into the current pending journal entry.
+	 */
+	dns_diff_appendminimal(diff, &tuple);
+
+	return ISC_R_SUCCESS;
 }

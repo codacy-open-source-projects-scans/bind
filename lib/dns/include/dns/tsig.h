@@ -20,6 +20,7 @@
 #include <isc/hashmap.h>
 #include <isc/refcount.h>
 #include <isc/rwlock.h>
+#include <isc/sieve.h>
 #include <isc/stdio.h>
 #include <isc/stdtime.h>
 
@@ -67,13 +68,11 @@ struct dns_tsigkeyring {
 	unsigned int   writecount;
 	isc_rwlock_t   lock;
 	isc_mem_t     *mctx;
-	/*
-	 * LRU list of generated key along with a count of the keys on the
-	 * list and a maximum size.
-	 */
-	unsigned int generated;
-	ISC_LIST(dns_tsigkey_t) lru;
+
+	unsigned int   generated;
 	isc_refcount_t references;
+
+	ISC_SIEVE(dns_tsigkey_t) lrulist;
 };
 
 struct dns_tsigkey {
@@ -82,18 +81,19 @@ struct dns_tsigkey {
 	isc_mem_t      *mctx;
 	dst_key_t      *key; /*%< Key */
 	dns_fixedname_t fn;
-	dns_name_t     *name;		  /*%< Key name */
-	dst_algorithm_t alg;		  /*< Algorithm */
-	dns_name_t	algname;	  /*< Algorithm name, only used if
-					    algorithm is DST_ALG_UNKNOWN */
-	dns_name_t	  *creator;	  /*%< name that created secret */
-	bool		   generated : 1; /*%< key was auto-generated */
-	bool		   restored  : 1; /*%< key was restored at startup */
-	isc_stdtime_t	   inception;	  /*%< start of validity period */
-	isc_stdtime_t	   expire;	  /*%< end of validity period */
-	dns_tsigkeyring_t *ring;	  /*%< the enclosing keyring */
-	isc_refcount_t	   references;	  /*%< reference counter */
-	ISC_LINK(dns_tsigkey_t) link;
+	dns_name_t     *name;	      /*%< Key name */
+	dst_algorithm_t alg;	      /*< Algorithm */
+	dns_name_t	algname;      /*< Algorithm name, only used if
+					algorithm is DST_ALG_UNKNOWN */
+	dns_name_t    *creator;	      /*%< name that created secret */
+	bool	       generated : 1; /*%< key was auto-generated */
+	bool	       restored	 : 1; /*%< key was restored at startup */
+	isc_stdtime_t  inception;     /*%< start of validity period */
+	isc_stdtime_t  expire;	      /*%< end of validity period */
+	isc_refcount_t references;    /*%< reference counter */
+
+	bool visited;
+	ISC_LINK(dns_tsigkey_t) lrulink; /*%< SIEVE LRU link */
 };
 
 const dns_name_t *
@@ -126,7 +126,7 @@ dns_tsigkey_createfromkey(const dns_name_t *name, dst_algorithm_t algorithm,
  *	and will not expire if inception == expire.
  *
  *	If generated is true (meaning the key was generated
- *	via TKEY negotation), the creating identity (if any), should
+ *	via TKEY negotiation), the creating identity (if any), should
  *	be specified in the creator parameter.
  *
  *	If restored is true, this indicates the key was restored from
@@ -163,13 +163,14 @@ dns_tsigkey_createfromkey(const dns_name_t *name, dst_algorithm_t algorithm,
  */
 
 void
-dns_tsigkey_delete(dns_tsigkey_t *key);
+dns_tsigkey_delete(dns_tsigkeyring_t *ring, dns_tsigkey_t *key);
 /*%<
  *	Prevents this key from being used again.  It will be deleted when
  *	no references exist.
  *
  *	Requires:
- *\li		'key' is a valid TSIG key on a keyring
+ *\li		'ring' is a valid TSIG keyring
+ *\li		'key' is a valid TSIG key on a keyring 'ring'
  */
 
 isc_result_t
@@ -276,13 +277,34 @@ dns_tsigkeyring_add(dns_tsigkeyring_t *ring, dns_tsigkey_t *tkey);
  *\li		Any other value indicates failure.
  */
 
+#if DNS_TSIG_TRACE
+#define dns_tsigkeyring_dumpanddetach(ringp, keyfile)                      \
+	dns_tsigkeyring__dumpanddetach(ringp, keyfile, __func__, __FILE__, \
+				       __LINE__)
 isc_result_t
-dns_tsigkeyring_dump(dns_tsigkeyring_t *ring, FILE *fp);
+dns_tsigkeyring__dumpanddetach(dns_tsigkeyring_t **ringp, const char *keyfile,
+			       const char *func, const char *file,
+			       const unsigned int line);
+#else
+isc_result_t
+dns_tsigkeyring_dumpanddetach(dns_tsigkeyring_t **ringp, const char *keyfile);
+#endif
 /*%<
- *	Dump a TSIG key ring to 'fp'.
+ *	Dump a TSIG key ring to file named 'keyfile'.
+ *
+ *	The caller's reference is always released and '*ringp' is set to
+ *	NULL, whatever the result.  Only the final owner writes 'keyfile';
+ *	any other caller gets #DNS_R_CONTINUE and writes nothing, because
+ *	dumping a GSS key consumes its security context.
  *
  *	Requires:
- *\li		'ring' is a valid keyring.
+ *\li		'*ringp' is a valid keyring.
+ *
+ *	Returns:
+ *\li		#ISC_R_SUCCESS if at least one key was written.
+ *\li		#ISC_R_NOTFOUND if no keys could be written.
+ *\li		#ISC_R_IOERROR on a write error.
+ *\li		#DNS_R_CONTINUE if we continue to use the keyring.
  */
 
 void

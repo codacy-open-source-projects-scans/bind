@@ -183,17 +183,21 @@ svc_keyfromregion(isc_textregion_t *region, char sep, uint16_t *value,
 	/* Look for known key names.  */
 	for (i = 0; i < ARRAY_SIZE(sbpr); i++) {
 		size_t len = strlen(sbpr[i].name);
-		if (strncasecmp(region->base, sbpr[i].name, len) != 0 ||
-		    (region->base[len] != 0 && region->base[len] != sep))
-		{
+		if (strncasecmp(region->base, sbpr[i].name, len) != 0) {
 			continue;
 		}
+
+		INSIST(region->length >= len);
+		if (region->length != len && region->base[len] != sep) {
+			continue;
+		}
+
 		isc_textregion_consume(region, len);
 		ul = sbpr[i].value;
 		goto finish;
 	}
 	/* Handle keyXXXXX form. */
-	if (strncmp(region->base, "key", 3) != 0) {
+	if (!isc_string_hasprefix(region->base, "key")) {
 		return DNS_R_SYNTAX;
 	}
 	isc_textregion_consume(region, 3);
@@ -245,13 +249,16 @@ svc_fromtext(isc_textregion_t *region, isc_buffer_t *target) {
 
 	for (i = 0; i < ARRAY_SIZE(sbpr); i++) {
 		len = strlen(sbpr[i].name);
-		if (strncmp(region->base, sbpr[i].name, len) != 0 ||
-		    (region->base[len] != 0 && region->base[len] != '='))
-		{
+		if (strncmp(region->base, sbpr[i].name, len) != 0) {
 			continue;
 		}
 
-		if (region->base[len] == '=') {
+		INSIST(region->length >= len);
+		if (region->length != len) {
+			if (region->base[len] != '=') {
+				continue;
+			}
+
 			len++;
 		}
 
@@ -270,7 +277,11 @@ svc_fromtext(isc_textregion_t *region, isc_buffer_t *target) {
 			RETERR(alpn_fromtxt(region, target));
 			break;
 		case sbpr_port:
-			if (!isdigit((unsigned char)*region->base)) {
+			if (region->length == 0 ||
+			    !isdigit((unsigned char)region->base[0]) ||
+			    /* Reject embedded NUL bytes. */
+			    memchr(region->base, 0, region->length) != NULL)
+			{
 				return DNS_R_SYNTAX;
 			}
 			ul = strtoul(region->base, &e, 10);
@@ -283,6 +294,10 @@ svc_fromtext(isc_textregion_t *region, isc_buffer_t *target) {
 			RETERR(uint16_tobuffer(ul, target));
 			break;
 		case sbpr_ipv4s:
+			/* Reject embedded NUL bytes. */
+			if (memchr(region->base, 0, region->length) != NULL) {
+				return DNS_R_SYNTAX;
+			}
 			do {
 				snprintf(tbuf, sizeof(tbuf), "%*s",
 					 (int)(region->length), region->base);
@@ -299,6 +314,10 @@ svc_fromtext(isc_textregion_t *region, isc_buffer_t *target) {
 			} while (e != NULL);
 			break;
 		case sbpr_ipv6s:
+			/* Reject embedded NUL bytes. */
+			if (memchr(region->base, 0, region->length) != NULL) {
+				return DNS_R_SYNTAX;
+			}
 			do {
 				snprintf(tbuf, sizeof(tbuf), "%*s",
 					 (int)(region->length), region->base);
@@ -315,6 +334,10 @@ svc_fromtext(isc_textregion_t *region, isc_buffer_t *target) {
 			} while (e != NULL);
 			break;
 		case sbpr_base64:
+			/* Reject embedded NUL bytes. */
+			if (memchr(region->base, 0, region->length) != NULL) {
+				return DNS_R_SYNTAX;
+			}
 			RETERR(isc_base64_decodestring(region->base, target));
 			break;
 		case sbpr_empty:
@@ -1031,12 +1054,11 @@ generic_tostruct_in_svcb(ARGS_TOSTRUCT) {
 	dns_name_fromregion(&name, &region);
 	isc_region_consume(&region, name_length(&name));
 
-	name_duporclone(&name, mctx, &svcb->svcdomain);
+	dns_name_clone(&name, &svcb->svcdomain);
 	svcb->svclen = region.length;
-	svcb->svc = mem_maybedup(mctx, region.base, region.length);
+	svcb->svc = region.base;
 
 	svcb->offset = 0;
-	svcb->mctx = mctx;
 
 	return ISC_R_SUCCESS;
 }
@@ -1053,32 +1075,6 @@ tostruct_in_svcb(ARGS_TOSTRUCT) {
 	return generic_tostruct_in_svcb(CALL_TOSTRUCT);
 }
 
-static void
-generic_freestruct_in_svcb(ARGS_FREESTRUCT) {
-	dns_rdata_in_svcb_t *svcb = source;
-
-	REQUIRE(svcb != NULL);
-
-	if (svcb->mctx == NULL) {
-		return;
-	}
-
-	dns_name_free(&svcb->svcdomain, svcb->mctx);
-	isc_mem_free(svcb->mctx, svcb->svc);
-	svcb->mctx = NULL;
-}
-
-static void
-freestruct_in_svcb(ARGS_FREESTRUCT) {
-	dns_rdata_in_svcb_t *svcb = source;
-
-	REQUIRE(svcb != NULL);
-	REQUIRE(svcb->common.rdclass == dns_rdataclass_in);
-	REQUIRE(svcb->common.rdtype == dns_rdatatype_svcb);
-
-	generic_freestruct_in_svcb(CALL_FREESTRUCT);
-}
-
 static isc_result_t
 generic_additionaldata_in_svcb(ARGS_ADDLDATA) {
 	bool alias, done = false;
@@ -1087,6 +1083,7 @@ generic_additionaldata_in_svcb(ARGS_ADDLDATA) {
 	dns_rdataset_t rdataset;
 	isc_region_t region;
 	unsigned int cnames = 0;
+	isc_result_t result;
 
 	dns_name_init(&name);
 	dns_rdata_toregion(rdata, &region);
@@ -1095,11 +1092,11 @@ generic_additionaldata_in_svcb(ARGS_ADDLDATA) {
 
 	dns_name_fromregion(&name, &region);
 
-	if (dns_name_equal(&name, dns_rootname)) {
+	if (dns_name_isroot(&name)) {
 		/*
 		 * "." only means owner name in service form.
 		 */
-		if (alias || dns_name_equal(owner, dns_rootname) ||
+		if (alias || dns_name_isroot(owner) ||
 		    !dns_name_ishostname(owner, false))
 		{
 			return ISC_R_SUCCESS;
@@ -1115,10 +1112,14 @@ generic_additionaldata_in_svcb(ARGS_ADDLDATA) {
 	dns_rdataset_init(&rdataset);
 	fname = dns_fixedname_initname(&fixed);
 	do {
-		RETERR((add)(arg, &name, dns_rdatatype_cname,
-			     &rdataset DNS__DB_FILELINE));
+		result = (add)(arg, &name, dns_rdatatype_cname,
+			       &rdataset DNS__DB_FILELINE);
+		if (result != ISC_R_SUCCESS) {
+			dns_rdataset_cleanup(&rdataset);
+			return result;
+		}
+
 		if (dns_rdataset_isassociated(&rdataset)) {
-			isc_result_t result;
 			result = dns_rdataset_first(&rdataset);
 			if (result == ISC_R_SUCCESS) {
 				dns_rdata_t current = DNS_RDATA_INIT;
@@ -1126,8 +1127,7 @@ generic_additionaldata_in_svcb(ARGS_ADDLDATA) {
 
 				dns_rdataset_current(&rdataset, &current);
 
-				result = dns_rdata_tostruct(&current, &cname,
-							    NULL);
+				result = dns_rdata_tostruct(&current, &cname);
 				RUNTIME_CHECK(result == ISC_R_SUCCESS);
 				dns_name_copy(&cname.cname, fname);
 				dns_name_clone(fname, &name);
@@ -1150,11 +1150,21 @@ generic_additionaldata_in_svcb(ARGS_ADDLDATA) {
 	 * Look up HTTPS/SVCB records when processing the alias form.
 	 */
 	if (alias) {
-		RETERR((add)(arg, &name, rdata->type,
-			     &rdataset DNS__DB_FILELINE));
+		result = (add)(arg, &name, rdata->type,
+			       &rdataset DNS__DB_FILELINE);
+		if (result != ISC_R_SUCCESS) {
+			dns_rdataset_cleanup(&rdataset);
+			return result;
+		}
+
 		/*
-		 * Don't return A or AAAA if this is not the last element
-		 * in the HTTP / SVCB chain.
+		 * If the target has an HTTPS/SVCB RRset, the callback has
+		 * already added and followed it, and the client will use it
+		 * next; the target's own A/AAAA would only be dead weight.
+		 *
+		 * If it has none, the alias chain ends here and the client
+		 * resolves the target's A/AAAA directly (RFC 9460 section
+		 * 3), so look those up.
 		 */
 		if (dns_rdataset_isassociated(&rdataset)) {
 			dns_rdataset_disassociate(&rdataset);

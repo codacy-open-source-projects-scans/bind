@@ -14,6 +14,7 @@ isc_test = [
     'async',
     'buffer',
     'counter',
+    'crypto',
     'dnsstream_utils',
     'errno',
     'file',
@@ -45,6 +46,7 @@ isc_test = [
     'sockaddr',
     'spinlock',
     'stats',
+    'string',
     'symtab',
     'tcp',
     'tcpdns',
@@ -53,6 +55,8 @@ isc_test = [
     'tls',
     'tlsdns',
     'udp',
+    'url',
+    'utf8',
     'work',
 ]
 
@@ -61,6 +65,14 @@ flaky_isc_test = [
 ]
 
 is_el8 = run_command('grep', '-q', '-F', 'platform:el8', '/etc/os-release', check: false).returncode() == 0
+
+_all_isc_test = isc_test + ['doh']
+run_command(
+    check_test_registration,
+    meson.current_source_dir(),
+    _all_isc_test,
+    check: true,
+)
 
 if config.has('HAVE_LIBNGHTTP2') and not is_el8
     isc_test += 'doh'
@@ -92,16 +104,21 @@ foreach unit : isc_test
 
     suites = ['isc', 'cmocka']
     timeout = 300
+    unit_env = test_env
     if unit in flaky_isc_test
         suites += 'flaky'
-        # Pass FLAKY and TIMEOUT to the test wrapper so it can retry appropriately
-        test_env.set('FLAKY', '1')
-        test_env.set('TIMEOUT', timeout.to_string())
+        # Pass FLAKY and TIMEOUT to the test wrapper so it can retry
+        # appropriately.  Build a fresh environment instead of mutating the
+        # shared test_env, which meson stores by reference and would otherwise
+        # leak these variables into every other test.
+        unit_env = environment(
+            test_env_vars + {'FLAKY': '1', 'TIMEOUT': timeout.to_string()},
+        )
     endif
     test(
         unit,
         test_bin,
-        env: test_env,
+        env: unit_env,
         suite: suites,
         timeout: timeout,
         workdir: meson.current_source_dir(),

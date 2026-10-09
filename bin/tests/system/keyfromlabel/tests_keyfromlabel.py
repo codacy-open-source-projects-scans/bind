@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -16,6 +16,8 @@ import os
 import shutil
 
 import pytest
+
+from isctest.util import param
 
 import isctest.mark
 
@@ -93,15 +95,29 @@ def token_init_and_cleanup():
         ("rsasha512", "rsa", "2048"),
         ("ecdsap256sha256", "EC", "prime256v1"),
         ("ecdsap384sha384", "EC", "prime384v1"),
-        # Edwards curves are not yet supported by OpenSC
-        # ("ed25519","EC","edwards25519"),
-        # ("ed448","EC","edwards448")
+        param(
+            "ed25519",
+            "EC",
+            "Ed25519",
+            marks=pytest.mark.skipif(
+                os.environ.get("ED25519_SUPPORTED") != "1",
+                reason="Ed25519 not supported by this build",
+            ),
+        ),
+        param(
+            "ed448",
+            "EC",
+            "Ed448",
+            marks=pytest.mark.skipif(
+                os.environ.get("ED448_SUPPORTED") != "1",
+                reason="Ed448 not supported by this build",
+            ),
+        ),
     ],
 )
 def test_keyfromlabel(alg_name, alg_type, alg_bits):
 
-    def keygen(alg_type, alg_bits, zone, key_id):
-        label = f"{key_id}-{zone}"
+    def keygen(alg_type, alg_bits, label):
         p11_id = hashlib.sha1(label.encode("utf-8")).hexdigest()
 
         pkcs11_command = [
@@ -126,7 +142,7 @@ def test_keyfromlabel(alg_name, alg_type, alg_bits):
 
         assert "Key pair generated" in cmd.out
 
-    def keyfromlabel(alg_name, zone, key_id, key_flag):
+    def keyfromlabel(alg_name, zone, label, key_flag):
         key_flag = key_flag.split() if key_flag else []
 
         keyfrlab_command = [
@@ -135,16 +151,32 @@ def test_keyfromlabel(alg_name, alg_type, alg_bits):
             alg_name,
             "-y",
             "-l",
-            f"pkcs11:token=softhsm2-keyfromlabel;object={key_id}-{zone};pin-source=pin",
+            f"pkcs11:token=softhsm2-keyfromlabel;object={label};pin-source=pin",
             *key_flag,
             zone,
         ]
 
-        cmd = isctest.run.cmd(keyfrlab_command)
+        cmd = isctest.run.cmd(keyfrlab_command, raise_on_exception=False)
+        if cmd.rc != 0 and "already exists" in cmd.err:
+            return None
+        assert cmd.rc == 0
         keyfile = cmd.out.rstrip() + ".key"
 
         assert os.path.exists(keyfile)
 
+        return keyfile
+
+    def hsm_key(alg_type, alg_bits, alg_name, zone, key_id, key_flag):
+        # Unlike dnssec-keygen, pkcs11-tool does not avoid key tag collisions,
+        # so dnssec-keyfromlabel may refuse a key. Replace it then.
+        keyfile = None
+        for attempt in range(3):
+            label = f"{key_id}-{attempt}-{zone}"
+            keygen(alg_type, alg_bits, label)
+            keyfile = keyfromlabel(alg_name, zone, label, key_flag)
+            if keyfile is not None:
+                break
+        assert keyfile is not None, f"{key_id}: key tags keep colliding"
         return keyfile
 
     if f"{alg_name.upper()}_SUPPORTED" not in os.environ:
@@ -153,14 +185,11 @@ def test_keyfromlabel(alg_name, alg_type, alg_bits):
     # Generate keys for the $zone zone
     zone = f"{alg_name}.example"
 
-    keygen(alg_type, alg_bits, zone, "keyfromlabel-zsk")
-    keygen(alg_type, alg_bits, zone, "keyfromlabel-ksk")
-
     # Get ZSK
-    zsk_file = keyfromlabel(alg_name, zone, "keyfromlabel-zsk", "")
+    zsk_file = hsm_key(alg_type, alg_bits, alg_name, zone, "keyfromlabel-zsk", "")
 
     # Get KSK
-    ksk_file = keyfromlabel(alg_name, zone, "keyfromlabel-ksk", "-f KSK")
+    ksk_file = hsm_key(alg_type, alg_bits, alg_name, zone, "keyfromlabel-ksk", "-f KSK")
 
     # Sign zone with KSK and ZSK
     zone_file = f"zone.{alg_name}.example.db"

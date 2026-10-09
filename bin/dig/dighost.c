@@ -288,16 +288,33 @@ append(const char *text, size_t len, char **p, char *end) {
 
 static isc_result_t
 reverse_octets(const char *in, char **p, char *end) {
-	const char *dot = strchr(in, '.');
-	size_t len;
-	if (dot != NULL) {
-		RETERR(reverse_octets(dot + 1, p, end));
-		RETERR(append(".", 1, p, end));
-		len = (int)(dot - in);
-	} else {
-		len = (int)strlen(in);
+	const char *parts[DNS_NAME_MAXLABELS];
+	size_t lens[DNS_NAME_MAXLABELS];
+	size_t n = 0;
+	const char *cursor = in;
+
+	while (true) {
+		const char *dot = strchr(cursor, '.');
+		if (n >= DNS_NAME_MAXLABELS) {
+			return DNS_R_NAMETOOLONG;
+		}
+		parts[n] = cursor;
+		lens[n] = (dot != NULL) ? (size_t)(dot - cursor)
+					: strlen(cursor);
+		n++;
+		if (dot == NULL) {
+			break;
+		}
+		cursor = dot + 1;
 	}
-	return append(in, len, p, end);
+
+	for (size_t i = n; i-- > 0;) {
+		if (i + 1 < n) {
+			RETERR(append(".", 1, p, end));
+		}
+		RETERR(append(parts[i], lens[i], p, end));
+	}
+	return ISC_R_SUCCESS;
 }
 
 isc_result_t
@@ -780,8 +797,7 @@ clone_lookup(dig_lookup_t *lookold, bool servers) {
 			sizeof(*looknew->ecs_addr));
 	}
 
-	dns_name_copy(dns_fixedname_name(&lookold->fdomain),
-		      dns_fixedname_name(&looknew->fdomain));
+	dns_name_copy(&lookold->fdomain, dns_name(&looknew->fdomain));
 
 	if (servers) {
 		if (lookold->tls_ctx_cache != NULL) {
@@ -897,7 +913,7 @@ parse_xint(uint32_t *uip, const char *value, uint32_t max, const char *desc) {
 }
 
 static uint32_t
-parse_bits(char *arg, const char *desc, uint32_t max) {
+parse_bits(const char *arg, const char *desc, uint32_t max) {
 	isc_result_t result;
 	uint32_t tmp;
 
@@ -993,6 +1009,7 @@ done:
 void
 parse_hmac(const char *algname) {
 	char buf[20];
+	const char *bits = NULL;
 	size_t len;
 
 	REQUIRE(algname != NULL);
@@ -1007,35 +1024,47 @@ parse_hmac(const char *algname) {
 
 	if (strcasecmp(buf, "hmac-md5") == 0) {
 		hmac_alg = DST_ALG_HMACMD5;
-	} else if (strncasecmp(buf, "hmac-md5-", 9) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-md5-")) !=
+		   NULL)
+	{
 		hmac_alg = DST_ALG_HMACMD5;
-		digestbits = parse_bits(&buf[9], "digest-bits [0..128]", 128);
+		digestbits = parse_bits(bits, "digest-bits [0..128]", 128);
 	} else if (strcasecmp(buf, "hmac-sha1") == 0) {
 		hmac_alg = DST_ALG_HMACSHA1;
 		digestbits = 0;
-	} else if (strncasecmp(buf, "hmac-sha1-", 10) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha1-")) !=
+		   NULL)
+	{
 		hmac_alg = DST_ALG_HMACSHA1;
-		digestbits = parse_bits(&buf[10], "digest-bits [0..160]", 160);
+		digestbits = parse_bits(bits, "digest-bits [0..160]", 160);
 	} else if (strcasecmp(buf, "hmac-sha224") == 0) {
 		hmac_alg = DST_ALG_HMACSHA224;
-	} else if (strncasecmp(buf, "hmac-sha224-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha224-")) !=
+		   NULL)
+	{
 		hmac_alg = DST_ALG_HMACSHA224;
-		digestbits = parse_bits(&buf[12], "digest-bits [0..224]", 224);
+		digestbits = parse_bits(bits, "digest-bits [0..224]", 224);
 	} else if (strcasecmp(buf, "hmac-sha256") == 0) {
 		hmac_alg = DST_ALG_HMACSHA256;
-	} else if (strncasecmp(buf, "hmac-sha256-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha256-")) !=
+		   NULL)
+	{
 		hmac_alg = DST_ALG_HMACSHA256;
-		digestbits = parse_bits(&buf[12], "digest-bits [0..256]", 256);
+		digestbits = parse_bits(bits, "digest-bits [0..256]", 256);
 	} else if (strcasecmp(buf, "hmac-sha384") == 0) {
 		hmac_alg = DST_ALG_HMACSHA384;
-	} else if (strncasecmp(buf, "hmac-sha384-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha384-")) !=
+		   NULL)
+	{
 		hmac_alg = DST_ALG_HMACSHA384;
-		digestbits = parse_bits(&buf[12], "digest-bits [0..384]", 384);
+		digestbits = parse_bits(bits, "digest-bits [0..384]", 384);
 	} else if (strcasecmp(buf, "hmac-sha512") == 0) {
 		hmac_alg = DST_ALG_HMACSHA512;
-	} else if (strncasecmp(buf, "hmac-sha512-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha512-")) !=
+		   NULL)
+	{
 		hmac_alg = DST_ALG_HMACSHA512;
-		digestbits = parse_bits(&buf[12], "digest-bits [0..512]", 512);
+		digestbits = parse_bits(bits, "digest-bits [0..512]", 512);
 	} else {
 		fprintf(stderr,
 			";; Warning, ignoring "
@@ -1412,8 +1441,8 @@ save_opt(dig_lookup_t *lookup, char *code, char *value) {
  * type, and class.
  */
 static void
-add_question(dns_message_t *message, dns_name_t *name, dns_rdataclass_t rdclass,
-	     dns_rdatatype_t rdtype) {
+add_question(dns_message_t *message, dns_linkedname_t *name,
+	     dns_rdataclass_t rdclass, dns_rdatatype_t rdtype) {
 	dns_rdataset_t *rdataset;
 
 	debug("add_question()");
@@ -1786,7 +1815,7 @@ followup_lookup(dns_message_t *msg, dig_query_t *query, dns_section_t section) {
 			unsigned int nlabels;
 			int order;
 
-			domain = dns_fixedname_name(&query->lookup->fdomain);
+			domain = dns_name(&query->lookup->fdomain);
 			namereln = dns_name_fullcompare(name, domain, &order,
 							&nlabels);
 			if (namereln == dns_namereln_equal) {
@@ -1818,10 +1847,9 @@ followup_lookup(dns_message_t *msg, dig_query_t *query, dns_section_t section) {
 			dns_rdataset_current(rdataset, &rdata);
 
 			query->lookup->nsfound++;
-			result = dns_rdata_tostruct(&rdata, &ns, NULL);
+			result = dns_rdata_tostruct(&rdata, &ns);
 			check_result(result, "dns_rdata_tostruct");
 			dns_name_format(&ns.name, namestr, sizeof(namestr));
-			dns_rdata_freestruct(&ns);
 
 			/* Initialize lookup if we've not yet */
 			debug("found NS %s", namestr);
@@ -1844,7 +1872,7 @@ followup_lookup(dns_message_t *msg, dig_query_t *query, dns_section_t section) {
 				if (lookup->ns_search_only) {
 					lookup->recurse = false;
 				}
-				domain = dns_fixedname_name(&lookup->fdomain);
+				domain = dns_name(&lookup->fdomain);
 				dns_name_copy(name, domain);
 				lookup->edns = lookup->original_edns;
 			}
@@ -1977,10 +2005,9 @@ insert_soa(dig_lookup_t *lookup) {
 	dns_rdata_t *rdata = NULL;
 	dns_rdatalist_t *rdatalist = NULL;
 	dns_rdataset_t *rdataset = NULL;
-	dns_name_t *soaname = NULL;
+	dns_linkedname_t *soaname = NULL;
 
 	debug("insert_soa()");
-	soa.mctx = isc_g_mctx;
 	soa.serial = lookup->ixfr_serial;
 	soa.refresh = 0;
 	soa.retry = 0;
@@ -2014,7 +2041,7 @@ insert_soa(dig_lookup_t *lookup) {
 	dns_rdatalist_tordataset(rdatalist, rdataset);
 
 	dns_message_gettempname(lookup->sendmsg, &soaname);
-	dns_name_clone(lookup->name, soaname);
+	dns_name_clone(lookup->name, dns_name(soaname));
 	ISC_LIST_INIT(soaname->list);
 	ISC_LIST_APPEND(soaname->list, rdataset, link);
 	dns_message_addname(lookup->sendmsg, soaname, DNS_SECTION_AUTHORITY);
@@ -2143,8 +2170,10 @@ setup_lookup(dig_lookup_t *lookup) {
 	}
 
 	if (lookup->origin != NULL) {
+		dns_linkedname_t *oname = NULL;
+
 		debug("trying origin %s", lookup->origin->origin);
-		dns_message_gettempname(lookup->sendmsg, &lookup->oname);
+		dns_message_gettempname(lookup->sendmsg, &oname);
 		/* XXX Helper funct to conv char* to name? */
 		origin = lookup->origin->origin;
 #ifdef HAVE_LIBIDN2
@@ -2157,16 +2186,16 @@ setup_lookup(dig_lookup_t *lookup) {
 		len = (unsigned int)strlen(origin);
 		isc_buffer_init(&b, origin, len);
 		isc_buffer_add(&b, len);
-		result = dns_name_fromtext(lookup->oname, &b, dns_rootname, 0);
+		result = dns_name_fromtext(dns_name(oname), &b, dns_rootname,
+					   0);
 		if (result != ISC_R_SUCCESS) {
 			dns_message_puttempname(lookup->sendmsg, &lookup->name);
-			dns_message_puttempname(lookup->sendmsg,
-						&lookup->oname);
+			dns_message_puttempname(lookup->sendmsg, &oname);
 			fatal("'%s' is not in legal name syntax (%s)", origin,
 			      isc_result_totext(result));
 		}
 		if (lookup->trace && lookup->trace_root) {
-			dns_name_clone(dns_rootname, lookup->name);
+			dns_name_clone(dns_rootname, dns_name(lookup->name));
 		} else {
 			dns_fixedname_t fixed;
 			dns_name_t *name;
@@ -2179,17 +2208,18 @@ setup_lookup(dig_lookup_t *lookup) {
 			if (result == ISC_R_SUCCESS) {
 				if (!dns_name_isabsolute(name)) {
 					result = dns_name_concatenate(
-						name, lookup->oname,
-						lookup->name);
+						name, dns_name(oname),
+						dns_name(lookup->name));
 				} else {
-					dns_name_copy(name, lookup->name);
+					dns_name_copy(name,
+						      dns_name(lookup->name));
 				}
 			}
 			if (result != ISC_R_SUCCESS) {
 				dns_message_puttempname(lookup->sendmsg,
 							&lookup->name);
 				dns_message_puttempname(lookup->sendmsg,
-							&lookup->oname);
+							&oname);
 				if (result == DNS_R_NAMETOOLONG) {
 					return false;
 				}
@@ -2198,16 +2228,16 @@ setup_lookup(dig_lookup_t *lookup) {
 				      isc_result_totext(result));
 			}
 		}
-		dns_message_puttempname(lookup->sendmsg, &lookup->oname);
+		dns_message_puttempname(lookup->sendmsg, &oname);
 	} else {
 		debug("using root origin");
 		if (lookup->trace && lookup->trace_root) {
-			dns_name_clone(dns_rootname, lookup->name);
+			dns_name_clone(dns_rootname, dns_name(lookup->name));
 		} else {
 			len = (unsigned int)strlen(textname);
 			isc_buffer_init(&b, textname, len);
 			isc_buffer_add(&b, len);
-			result = dns_name_fromtext(lookup->name, &b,
+			result = dns_name_fromtext(dns_name(lookup->name), &b,
 						   dns_rootname, 0);
 			if (result != ISC_R_SUCCESS) {
 				dns_message_puttempname(lookup->sendmsg,
@@ -3291,6 +3321,17 @@ try_next_server(dig_lookup_t *lookup) {
 	return true;
 }
 
+/*
+ * Print the lookup's startup banner.  It is skipped in +yaml mode, where
+ * the ";"-prefixed banner is not valid YAML and would corrupt the output.
+ */
+static void
+print_cmdline(const dig_lookup_t *l) {
+	if (!yaml) {
+		printf("%s", l->cmdline);
+	}
+}
+
 static void
 force_next(dig_query_t *query) {
 	dig_lookup_t *l = NULL;
@@ -3333,7 +3374,7 @@ force_next(dig_query_t *query) {
 
 		dighost_error("no response from %s", buf);
 	} else {
-		printf("%s", l->cmdline);
+		print_cmdline(l);
 		dighost_error("no servers could be reached");
 	}
 
@@ -3657,10 +3698,9 @@ check_for_more_data(dig_lookup_t *lookup, dig_query_t *query,
 
 				/* Now we have an SOA.  Work with it. */
 				debug("got an SOA");
-				result = dns_rdata_tostruct(&rdata, &soa, NULL);
+				result = dns_rdata_tostruct(&rdata, &soa);
 				check_result(result, "dns_rdata_tostruct");
 				serial = soa.serial;
-				dns_rdata_freestruct(&soa);
 				if (!query->first_soa_rcvd) {
 					query->first_soa_rcvd = true;
 					query->first_rr_serial = serial;
@@ -3788,6 +3828,9 @@ process_opt(dig_lookup_t *l, dns_message_t *msg) {
 		while (isc_buffer_remaininglength(&optbuf) >= 4) {
 			optcode = isc_buffer_getuint16(&optbuf);
 			optlen = isc_buffer_getuint16(&optbuf);
+			if (optlen > isc_buffer_remaininglength(&optbuf)) {
+				break;
+			}
 			switch (optcode) {
 			case DNS_OPT_COOKIE:
 				/*
@@ -3998,7 +4041,7 @@ recv_done(isc_nmhandle_t *handle, isc_result_t eresult, isc_region_t *region,
 			 * Otherwise, print the cmdline and an error message,
 			 * and cancel the lookup.
 			 */
-			printf("%s", l->cmdline);
+			print_cmdline(l);
 			dighost_error("no servers could be reached");
 
 			if (exitcode < 9) {
@@ -4672,6 +4715,7 @@ idn_filter(isc_buffer_t *buffer, unsigned int start) {
 	char *dst = NULL;
 	size_t srclen, dstlen;
 	int res;
+	isc_result_t result;
 
 	/*
 	 * Copy name from 'buffer' to 'src' and terminate it with NULL.
@@ -4691,7 +4735,7 @@ idn_filter(isc_buffer_t *buffer, unsigned int start) {
 	}
 	resetlocale(LC_ALL);
 	if (res != IDN2_OK) {
-		return ISC_R_SUCCESS;
+		CLEANUP(ISC_R_SUCCESS);
 	}
 
 	/*
@@ -4699,14 +4743,18 @@ idn_filter(isc_buffer_t *buffer, unsigned int start) {
 	 */
 	dstlen = strlen(dst);
 	if (isc_buffer_length(buffer) < start + dstlen) {
-		return ISC_R_NOSPACE;
+		CLEANUP(ISC_R_NOSPACE);
 	}
 	isc_buffer_subtract(buffer, srclen);
 	memmove(isc_buffer_used(buffer), dst, dstlen);
 	isc_buffer_add(buffer, dstlen);
 
-	idn2_free(dst);
-	return ISC_R_SUCCESS;
+	result = ISC_R_SUCCESS;
+cleanup:
+	if (dst != NULL) {
+		idn2_free(dst);
+	}
+	return result;
 }
 
 /*%

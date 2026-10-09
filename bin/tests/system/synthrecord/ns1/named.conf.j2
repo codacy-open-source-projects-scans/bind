@@ -1,22 +1,16 @@
 {% set inview = inview | default(False) %}
+{% set toolongprefix = toolongprefix | default(False) %}
+{% set nocookieudpsize = nocookieudpsize | default(False) %}
 
 options {
-	query-source address 10.53.0.1;
-	port @PORT@;
-	pid-file "named.pid";
-	listen-on { 10.53.0.1; };
-	listen-on-v6 { fd92:7065:b8e:ffff::1; };
+	{% include_indented "_common/options-dual.conf.j2" %}
 	recursion no;
+{% if nocookieudpsize %}
+	nocookie-udp-size 128;
+{% endif %}
 };
 
-key rndc_key {
-	secret "1234abcd8765";
-	algorithm @DEFAULT_HMAC@;
-};
-
-controls {
-	inet 10.53.0.1 port @CONTROLPORT@ allow { any; } keys { rndc_key; };
-};
+{% include "_common/controls.conf.j2" %}
 
 {% if inview %}
 plugin query "@TOP_BUILDDIR@/synthrecord" {
@@ -56,7 +50,11 @@ zone "0.53.10.in-addr.arpa." {
 	type primary;
 	file "0.53.10.in-addr.arpa.db";
 	plugin query "@TOP_BUILDDIR@/synthrecord" {
+{% if toolongprefix %}
+		prefix "waytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefixwaytoolongprefix";
+{% else %}
 		prefix "dynamic-";
+{% endif %}
 		allow-synth {
 			10.53.0.0/24;
 		};

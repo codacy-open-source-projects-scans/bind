@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -71,6 +71,16 @@ def test_hooks_zonetemplate2():
     msg = isctest.query.create("skipfoo.example4.com", "A")
     res = isctest.query.udp(msg, "10.53.0.2")
     isctest.check.rcode(res, dns.rcode.NOTZONE)
+
+    # test that the skip label is not matched add suffix
+    msg = isctest.query.create("skipfooX.example4.com", "A")
+    res = isctest.query.udp(msg, "10.53.0.2")
+    isctest.check.rcode(res, dns.rcode.NOTAUTH)
+
+    # test that the skip label is not matched add prefix
+    msg = isctest.query.create("Xskipfoo.example4.com", "A")
+    res = isctest.query.udp(msg, "10.53.0.2")
+    isctest.check.rcode(res, dns.rcode.NOTAUTH)
 
 
 def test_hooks_zone_rndc_reload(servers):

@@ -187,14 +187,45 @@ dns_diff_append(dns_diff_t *diff, dns_difftuple_t **tuple);
  * \li	The tuple has been freed, or will be freed when the diff is cleared.
  */
 
-bool
-dns_diff_is_boundary(const dns_diff_t *diff, dns_name_t *name);
+void
+dns_diff_prepend(dns_diff_t *diff, dns_difftuple_t **tuple);
 /*%<
- * Checks if 'name' is equal, up to case, to the last name of the diff.
+ * Prepend a single tuple to a diff.
  *
  * Requires:
  * \li	'diff' is a valid diff.
- * \li	'name' is a valid dns name.
+ * \li	'*tuple' is a valid tuple.
+ *
+ * Ensures:
+ * \li	*tuple is NULL.
+ * \li	The tuple has been freed, or will be freed when the diff is cleared.
+ */
+
+void
+dns_diff_appendlist(dns_diff_t *dst, dns_diff_t *src);
+/*%<
+ * Move all tuples from 'src' to the end of 'dst'.
+ *
+ * Requires:
+ * \li	'dst' is a valid diff.
+ * \li	'src' is a valid diff.
+ * \li	'dst' != 'src'.
+ *
+ * Ensures:
+ * \li	'src' is empty.
+ */
+
+void
+dns_diff_unlink(dns_diff_t *diff, dns_difftuple_t *tuple);
+/*%<
+ * Unlink a single tuple from a diff without freeing it.
+ *
+ * Requires:
+ * \li	'diff' is a valid diff.
+ * \li	'tuple' is a valid tuple in 'diff'.
+ *
+ * Ensures:
+ * \li	The caller owns 'tuple'.
  */
 
 size_t
@@ -214,6 +245,7 @@ dns_diff_appendminimal(dns_diff_t *diff, dns_difftuple_t **tuple);
  *
  * Requires:
  *\li	'diff' is a minimal diff.
+ *\li	'*tuple' is a valid tuple.
  *
  * Ensures:
  *\li	'diff' is still a minimal diff.
@@ -221,6 +253,23 @@ dns_diff_appendminimal(dns_diff_t *diff, dns_difftuple_t **tuple);
  *   \li	The tuple has been freed, or will be freed when the diff is
  * cleared.
  *
+ */
+
+void
+dns_diff_appendlistminimal(dns_diff_t *diff, dns_diff_t *source);
+/*%<
+ * Append all tuples from 'source' to 'diff', removing any duplicate
+ * or conflicting updates as needed to create a minimal diff.
+ *
+ * Requires:
+ *\li	'diff' is a valid diff.
+ *\li	'source' is a valid diff.
+ *
+ * Ensures:
+ *\li	'diff' is a minimal diff.
+ *\li	'source' is empty.
+ *\li	The tuples from 'source' have been freed, or will be freed when
+ *	'diff' is cleared.
  */
 
 isc_result_t
@@ -296,4 +345,20 @@ dns_diff_print(dns_diff_t *diff, FILE *file);
  * Returns:
  *\li	#ISC_R_SUCCESS
  *\li	any error from dns_rdataset_totext()
+ */
+
+isc_result_t
+dns_diff_applytuple(dns_difftuple_t **tuplep, dns_db_t *db,
+		    dns_dbversion_t *ver, dns_diff_t *diff);
+/*%<
+ * Apply the tuple (*tuplep) to the database (db) using version (ver) and if
+ * successful save to 'diff' or it is freed.
+ *
+ * Requires:
+ *\li	'tuplep' to be non NULL and '*tuplep' to be a valid tuple.
+ *\li	'db' to be a valid database.
+ *\li	'diff' to be a valid diff.
+ *
+ * Ensures:
+ *\li	'*tuplep' is NULL.
  */

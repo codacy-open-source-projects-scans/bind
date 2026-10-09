@@ -14,16 +14,19 @@
 /*! \file */
 
 #include "keygen.h"
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdlib.h>
 
 #include <isc/base64.h>
 #include <isc/buffer.h>
 #include <isc/file.h>
+#include <isc/md.h>
 #include <isc/mem.h>
 #include <isc/result.h>
 #include <isc/string.h>
 
+#include <dns/fixedname.h>
 #include <dns/keyvalues.h>
 #include <dns/name.h>
 
@@ -38,9 +41,9 @@
  */
 dns_secalg_t
 alg_fromtext(const char *name) {
-	const char *p = name;
-	if (strncasecmp(p, "hmac-", 5) == 0) {
-		p = &name[5];
+	const char *p = isc_string_casestripprefix(name, "hmac-");
+	if (p == NULL) {
+		p = name;
 	}
 
 	if (strcasecmp(p, "md5") == 0) {
@@ -88,6 +91,36 @@ alg_bits(dns_secalg_t alg) {
 }
 
 /*%
+ * Reject invalid key names and make them safe for embedding into
+ * rndc.conf and named.conf.
+ */
+void
+makesafe_keyname(const char *keyname, char *namebuf, size_t length,
+		 bool *wildcard) {
+	dns_fixedname_t fixed;
+	dns_name_t *name = dns_fixedname_initname(&fixed);
+	isc_result_t result;
+	isc_buffer_t b;
+
+	if (keyname == NULL || keyname[0] == '\0') {
+		fatal("key name must not be empty");
+	}
+	result = dns_name_fromstring(name, keyname, dns_rootname, 0, NULL);
+	if (result != ISC_R_SUCCESS) {
+		fatal("invalid key name: %s", isc_result_totext(result));
+	}
+
+	SET_IF_NOT_NULL(wildcard, dns_name_iswildcard(name));
+
+	isc_buffer_init(&b, namebuf, length);
+	result = dns_name_totext(name, DNS_NAME_QUOTED | DNS_NAME_OMITFINALDOT,
+				 &b);
+	if (result != ISC_R_SUCCESS) {
+		fatal("invalid key name: %s", isc_result_totext(result));
+	}
+}
+
+/*%
  * Generate a key of size 'keysize' and place it in 'key_txtbuffer'
  */
 void
@@ -96,7 +129,7 @@ generate_key(isc_mem_t *mctx, dns_secalg_t alg, int keysize,
 	isc_result_t result = ISC_R_SUCCESS;
 	isc_buffer_t key_rawbuffer;
 	isc_region_t key_rawregion;
-	char key_rawsecret[64];
+	char key_rawsecret[ISC_MAX_BLOCK_SIZE];
 	dst_key_t *key = NULL;
 
 	switch (alg) {

@@ -50,6 +50,7 @@
 
 #include <isc/job.h>
 #include <isc/refcount.h>
+#include <isc/work.h>
 
 #include <dns/fixedname.h>
 #include <dns/rdata.h>
@@ -60,10 +61,12 @@
 
 #include <dst/dst.h>
 
-#define DNS_VALIDATOR_NOQNAMEPROOF    0
-#define DNS_VALIDATOR_NODATAPROOF     1
-#define DNS_VALIDATOR_NOWILDCARDPROOF 2
-#define DNS_VALIDATOR_CLOSESTENCLOSER 3
+typedef enum {
+	DNS_VALIDATOR_NOQNAMEPROOF = 0,
+	DNS_VALIDATOR_NODATAPROOF = 1,
+	DNS_VALIDATOR_NOWILDCARDPROOF = 2,
+	DNS_VALIDATOR_MAXPROOF
+} dns_validator_proof_t;
 
 /*%
  * A validator object represents a validation in progress.
@@ -80,8 +83,8 @@ struct dns_validator {
 	isc_refcount_t references;
 
 	/* Name and type of the response to be validated. */
-	dns_name_t     *name;
-	dns_rdatatype_t type;
+	dns_linkedname_t *name;
+	dns_rdatatype_t	  type;
 
 	/*
 	 * Callback and argument to use to inform the caller
@@ -111,7 +114,11 @@ struct dns_validator {
 	/*
 	 * Proofs to be cached.
 	 */
-	dns_name_t *proofs[4];
+	dns_linkedname_t *proofs[DNS_VALIDATOR_MAXPROOF];
+	/*
+	 * The denial type (NSEC or NSEC3) of the NOQNAME proof.
+	 */
+	dns_rdatatype_t noqnametype;
 	/*
 	 * Optout proof seen.
 	 */
@@ -124,6 +131,8 @@ struct dns_validator {
 	/* Internal validator state */
 	atomic_bool	   canceling;
 	unsigned int	   attributes;
+	isc_work_t	  *offloaded_work;
+	isc_work_cb	   offloaded_cb;
 	dns_fetch_t	  *fetch;
 	dns_validator_t	  *subvalidator;
 	dns_validator_t	  *parent;
@@ -140,19 +149,21 @@ struct dns_validator {
 	dns_rdataset_t	   dsrdataset;
 	dns_fixedname_t	   fname;
 	dns_fixedname_t	   wild;
+	dns_fixedname_t	   wildsigner;
+	dns_fixedname_t	   nseczone;
 	dns_fixedname_t	   closest;
 	ISC_LINK(dns_validator_t) link;
-	unsigned int  depth;
-	unsigned int  authcount;
-	unsigned int  authfail;
-	isc_stdtime_t start;
-
+	unsigned int   depth;
+	unsigned int   authcount;
+	unsigned int   authfail;
+	isc_stdtime_t  start;
+	bool	       resume;
 	bool	       digest_sha1;
 	uint8_t	       unsupported_algorithm;
 	uint8_t	       unsupported_digest;
-	uint8_t	       validation_attempts;
+	uint16_t       matchds_attempts;
+	uint16_t       validation_attempts;
 	dns_rdata_t    rdata;
-	bool	       resume;
 	isc_counter_t *nvalidations;
 	isc_counter_t *nfails;
 	isc_counter_t *qc;
@@ -173,12 +184,13 @@ struct dns_validator {
 #define DNS_VALIDATOR_NONTA    0x0008U /*% Ignore NTA table */
 
 isc_result_t
-dns_validator_create(dns_view_t *view, dns_name_t *name, dns_rdatatype_t type,
-		     dns_rdataset_t *rdataset, dns_rdataset_t *sigrdataset,
-		     dns_message_t *message, unsigned int options,
-		     isc_loop_t *loop, isc_job_cb cb, void *arg,
-		     isc_counter_t *nvalidations, isc_counter_t *nfails,
-		     isc_counter_t *qc, isc_counter_t *gqc, fetchctx_t *parent,
+dns_validator_create(dns_view_t *view, dns_linkedname_t *name,
+		     dns_rdatatype_t type, dns_rdataset_t *rdataset,
+		     dns_rdataset_t *sigrdataset, dns_message_t *message,
+		     unsigned int options, isc_loop_t *loop, isc_job_cb cb,
+		     void *arg, isc_counter_t *nvalidations,
+		     isc_counter_t *nfails, isc_counter_t *qc,
+		     isc_counter_t *gqc, fetchctx_t *parent,
 		     dns_edectx_t *edectx, dns_validator_t **validatorp);
 /*%<
  * Start a DNSSEC validation.

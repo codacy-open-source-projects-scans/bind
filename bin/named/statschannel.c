@@ -539,6 +539,10 @@ init_desc(void) {
 	SET_RESSTATDESC(priming, "priming queries", "Priming");
 	SET_RESSTATDESC(forwardonlyfail, "all forwarders failed",
 			"ForwardOnlyFail");
+	SET_RESSTATDESC(mismatchtcp,
+			"queries retried over TCP after a response with "
+			"mismatched query id",
+			"MismatchTCP");
 
 	INSIST(i == dns_resstatscounter_max);
 
@@ -1135,7 +1139,6 @@ rdatasetstats_dump(dns_rdatastatstype_t type, uint64_t val, void *arg) {
 	const char *typestr;
 	bool nxrrset = false;
 	bool stale = false;
-	bool ancient = false;
 #ifdef HAVE_LIBXML2
 	void *writer;
 	int xmlrc;
@@ -1161,13 +1164,12 @@ rdatasetstats_dump(dns_rdatastatstype_t type, uint64_t val, void *arg) {
 
 	nxrrset = rdatastatstype_attr(type, DNS_RDATASTATSTYPE_ATTR_NXRRSET);
 	stale = rdatastatstype_attr(type, DNS_RDATASTATSTYPE_ATTR_STALE);
-	ancient = rdatastatstype_attr(type, DNS_RDATASTATSTYPE_ATTR_ANCIENT);
 
 	switch (dumparg->type) {
 	case isc_statsformat_file:
 		fp = dumparg->arg;
-		fprintf(fp, "%20" PRIu64 " %s%s%s%s\n", val, ancient ? "~" : "",
-			stale ? "#" : "", nxrrset ? "!" : "", typestr);
+		fprintf(fp, "%20" PRIu64 " %s%s%s\n", val, stale ? "#" : "",
+			nxrrset ? "!" : "", typestr);
 		break;
 	case isc_statsformat_xml:
 #ifdef HAVE_LIBXML2
@@ -1176,8 +1178,8 @@ rdatasetstats_dump(dns_rdatastatstype_t type, uint64_t val, void *arg) {
 		TRY0(xmlTextWriterStartElement(writer, ISC_XMLCHAR "rrset"));
 		TRY0(xmlTextWriterStartElement(writer, ISC_XMLCHAR "name"));
 		TRY0(xmlTextWriterWriteFormatString(
-			writer, "%s%s%s%s", ancient ? "~" : "",
-			stale ? "#" : "", nxrrset ? "!" : "", typestr));
+			writer, "%s%s%s", stale ? "#" : "", nxrrset ? "!" : "",
+			typestr));
 		TRY0(xmlTextWriterEndElement(writer)); /* name */
 
 		TRY0(xmlTextWriterStartElement(writer, ISC_XMLCHAR "counter"));
@@ -1190,8 +1192,8 @@ rdatasetstats_dump(dns_rdatastatstype_t type, uint64_t val, void *arg) {
 	case isc_statsformat_json:
 #ifdef HAVE_JSON_C
 		zoneobj = (json_object *)dumparg->arg;
-		snprintf(buf, sizeof(buf), "%s%s%s%s", ancient ? "~" : "",
-			 stale ? "#" : "", nxrrset ? "!" : "", typestr);
+		snprintf(buf, sizeof(buf), "%s%s%s", stale ? "#" : "",
+			 nxrrset ? "!" : "", typestr);
 		obj = json_object_new_int64(val);
 		if (obj == NULL) {
 			return;
@@ -2312,9 +2314,7 @@ cleanup:
 }
 
 static void
-wrap_xmlfree(isc_buffer_t *buffer, void *arg) {
-	UNUSED(arg);
-
+wrap_xmlfree(isc_buffer_t *buffer, void *arg ISC_ATTR_UNUSED) {
 	xmlFree(isc_buffer_base(buffer));
 }
 
@@ -2457,8 +2457,7 @@ render_xml_traffic(const isc_httpd_t *httpd, const isc_httpdurl_t *urlinfo,
 	} while (0)
 
 static void
-wrap_jsonfree(isc_buffer_t *buffer, void *arg) {
-	json_object_put(isc_buffer_base(buffer));
+wrap_jsonfree(isc_buffer_t *buffer ISC_ATTR_UNUSED, void *arg) {
 	if (arg != NULL) {
 		json_object_put((json_object *)arg);
 	}
@@ -3700,14 +3699,13 @@ render_json_traffic(const isc_httpd_t *httpd, const isc_httpdurl_t *urlinfo,
  * neither of libxml2 or json-c is configured.
  */
 static isc_result_t
-render_xsl(const isc_httpd_t *httpd, const isc_httpdurl_t *urlinfo, void *args,
-	   unsigned int *retcode, const char **retmsg, const char **mimetype,
-	   isc_buffer_t *b, isc_httpdfree_t **freecb, void **freecb_args) {
-	isc_result_t result;
-	char *p = NULL;
+render_xsl(const isc_httpd_t *httpd, const isc_httpdurl_t *urlinfo,
+	   void *args ISC_ATTR_UNUSED, unsigned int *retcode,
+	   const char **retmsg, const char **mimetype, isc_buffer_t *b,
+	   isc_httpdfree_t **freecb, void **freecb_args) {
+	REQUIRE(isc_buffer_length(b) == 0);
 
-	UNUSED(httpd);
-	UNUSED(args);
+	isc_result_t result;
 
 	*freecb = NULL;
 	*freecb_args = NULL;
@@ -3748,8 +3746,7 @@ render_xsl(const isc_httpd_t *httpd, const isc_httpdurl_t *urlinfo, void *args,
 send:
 	*retcode = 200;
 	*retmsg = "OK";
-	p = UNCONST(xslmsg);
-	isc_buffer_reinit(b, p, strlen(xslmsg));
+	isc_buffer_constinit(b, xslmsg, strlen(xslmsg));
 	isc_buffer_add(b, strlen(xslmsg));
 end:
 	return ISC_R_SUCCESS;
@@ -3846,12 +3843,11 @@ add_listener(named_server_t *server, named_statschannel_t **listenerp,
 
 	allow = cfg_tuple_get(listen_params, "allow");
 	if (allow != NULL && cfg_obj_islist(allow)) {
-		result = cfg_acl_fromconfig(allow, config, aclctx,
-					    listener->mctx, 0, &new_acl);
+		CHECK(cfg_acl_fromconfig(allow, config, aclctx, listener->mctx,
+					 0, &new_acl));
 	} else {
-		result = dns_acl_any(listener->mctx, &new_acl);
+		dns_acl_any(listener->mctx, &new_acl);
 	}
-	CHECK(result);
 
 	dns_acl_attach(new_acl, &listener->acl);
 	dns_acl_detach(&new_acl);
@@ -3976,7 +3972,8 @@ update_listener(named_server_t *server, named_statschannel_t **listenerp,
 		result = cfg_acl_fromconfig(allow, config, aclctx,
 					    listener->mctx, 0, &new_acl);
 	} else {
-		result = dns_acl_any(listener->mctx, &new_acl);
+		dns_acl_any(listener->mctx, &new_acl);
+		result = ISC_R_SUCCESS;
 	}
 
 	if (result == ISC_R_SUCCESS) {
@@ -4299,7 +4296,12 @@ named_stats_dump(named_server_t *server, FILE *fp) {
 	     result == ISC_R_SUCCESS; next = NULL,
 	    result = dns_zonemgr_next_zone(zone, &next), zone = next)
 	{
+		if (dns_zone_getstatlevel(zone) != dns_zonestat_full) {
+			continue;
+		}
+
 		isc_stats_t *zonestats = dns_zone_getrequeststats(zone);
+
 		if (zonestats != NULL) {
 			char zonename[DNS_NAME_FORMATSIZE];
 			dns_view_t *view = dns_zone_getview(zone);
@@ -4328,7 +4330,12 @@ named_stats_dump(named_server_t *server, FILE *fp) {
 	     result == ISC_R_SUCCESS; next = NULL,
 	    result = dns_zonemgr_next_zone(zone, &next), zone = next)
 	{
+		if (dns_zone_getstatlevel(zone) != dns_zonestat_full) {
+			continue;
+		}
+
 		isc_stats_t *gluecachestats = dns_zone_getgluecachestats(zone);
+
 		if (gluecachestats != NULL) {
 			char zonename[DNS_NAME_FORMATSIZE];
 			dns_view_t *view = dns_zone_getview(zone);

@@ -122,7 +122,7 @@ dns_ssu_external_match(const dns_name_t *identity, const dns_name_t *signer,
 	int fd;
 	const char *sock_path;
 	unsigned int req_len;
-	isc_region_t token_region = { NULL, 0 };
+	isc_region_t token_region = { 0 };
 	unsigned char *data;
 	isc_buffer_t buf;
 	uint32_t token_len = 0;
@@ -133,12 +133,12 @@ dns_ssu_external_match(const dns_name_t *identity, const dns_name_t *signer,
 	dns_name_format(identity, b_identity, sizeof(b_identity));
 
 	/* For now only local: is supported */
-	if (strncmp(b_identity, "local:", 6) != 0) {
+	sock_path = isc_string_stripprefix(b_identity, "local:");
+	if (sock_path == NULL) {
 		ssu_e_log(3, "ssu_external: invalid socket path '%s'",
 			  b_identity);
 		return false;
 	}
-	sock_path = &b_identity[6];
 
 	fd = ux_socket_connect(sock_path);
 	if (fd == -1) {

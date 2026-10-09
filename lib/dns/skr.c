@@ -153,7 +153,7 @@ dns_skrbundle_getsig(dns_skrbundle_t *bundle, dst_key_t *key,
 		}
 		INSIST(tuple->rdata.type == dns_rdatatype_rrsig);
 
-		RETERR(dns_rdata_tostruct(&tuple->rdata, &rrsig, NULL));
+		RETERR(dns_rdata_tostruct(&tuple->rdata, &rrsig));
 
 		/*
 		 * Check if covering type matches, and if the signature is
@@ -286,7 +286,8 @@ dns_skr_read(isc_mem_t *mctx, const char *filename, dns_name_t *origin,
 			}
 
 			/* Create new bundle */
-			CHECK(dns_time32_fromtext(STR(token), &bundle_id));
+			CHECK(dns_time32_fromregion(token.value.as_textregion,
+						    &bundle_id));
 			bundle = NULL;
 			skrbundle_create(mctx, (isc_stdtime_t)bundle_id,
 					 &bundle);
@@ -299,7 +300,7 @@ dns_skr_read(isc_mem_t *mctx, const char *filename, dns_name_t *origin,
 		} else {
 			isc_buffer_t buf;
 			dns_rdata_t *rdata = NULL;
-			u_char rdatabuf[DST_KEY_MAXSIZE];
+			uint8_t rdatabuf[DNS_RDATA_MAXLENGTH];
 			dns_rdatatype_t rdtype;
 
 			/* Parse record */

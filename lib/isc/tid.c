@@ -11,7 +11,6 @@
  * information regarding copyright ownership.
  */
 
-#include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -44,8 +43,10 @@ isc__tid_init(isc_tid_t tid) {
 void
 isc__tid_initcount(isc_tid_t count) {
 	REQUIRE(tid_count == 0 || tid_count == count);
-	REQUIRE(tid_count < ISC_TID_MAX);
-	tid_count = count;
+	REQUIRE(count < ISC_TID_MAX);
+	if (tid_count == 0) {
+		tid_count = count;
+	}
 }
 
 /**

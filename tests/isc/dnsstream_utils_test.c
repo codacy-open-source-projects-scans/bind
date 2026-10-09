@@ -381,7 +381,7 @@ ISC_RUN_TEST_IMPL(dnsasm_multiple_messages_test) {
 	verify_cbdata_t cbdata = { 0 };
 	size_t verified = 0;
 
-	isc_buffer_init(&dnsbuf, NULL, 0);
+	isc_buffer_initnull(&dnsbuf);
 	isc_buffer_setmctx(&dnsbuf, isc_g_mctx);
 	isc_buffer_putmem(&dnsbuf, (void *)request, sizeof(request));
 	isc_buffer_putmem(&dnsbuf, (void *)response, sizeof(response));
@@ -463,7 +463,7 @@ ISC_RUN_TEST_IMPL(dnsasm_error_data_test) {
 	isc_buffer_t dnsbuf;
 	uint16_t bad_data = 0;
 
-	isc_buffer_init(&dnsbuf, NULL, 0);
+	isc_buffer_initnull(&dnsbuf);
 	isc_buffer_setmctx(&dnsbuf, isc_g_mctx);
 
 	isc_buffer_putmem(&dnsbuf, (void *)request, sizeof(request));
@@ -505,19 +505,24 @@ ISC_RUN_TEST_IMPL(dnsasm_torn_randomly_test) {
 	isc_buffer_t dnsbuf;
 	size_t packetno;
 	isc_region_t packets[] = {
-		{ (void *)request, sizeof(request) },
-		{ (void *)response, sizeof(response) },
-		{ (void *)request_large, sizeof(request_large) },
-		{ (void *)response_large, sizeof(response_large) },
-		{ (void *)request, sizeof(request) },
-		{ (void *)response_large, sizeof(response_large) },
-		{ (void *)request_large, sizeof(request_large) },
-		{ (void *)response_large, sizeof(response_large) },
-		{ (void *)request, sizeof(request) },
+		{ .base = (void *)request, .length = sizeof(request) },
+		{ .base = (void *)response, .length = sizeof(response) },
+		{ .base = (void *)request_large,
+		  .length = sizeof(request_large) },
+		{ .base = (void *)response_large,
+		  .length = sizeof(response_large) },
+		{ .base = (void *)request, .length = sizeof(request) },
+		{ .base = (void *)response_large,
+		  .length = sizeof(response_large) },
+		{ .base = (void *)request_large,
+		  .length = sizeof(request_large) },
+		{ .base = (void *)response_large,
+		  .length = sizeof(response_large) },
+		{ .base = (void *)request, .length = sizeof(request) },
 	};
 	const size_t npackets = sizeof(packets) / sizeof(packets[0]);
 
-	isc_buffer_init(&dnsbuf, NULL, 0);
+	isc_buffer_initnull(&dnsbuf);
 	isc_buffer_setmctx(&dnsbuf, isc_g_mctx);
 
 	for (size_t i = 0; i < npackets; i++) {
@@ -599,7 +604,7 @@ ISC_RUN_TEST_IMPL(dnsasm_clear_buffer_within_cb_test) {
 	size_t verified = 0;
 	isc_buffer_t dnsbuf;
 
-	isc_buffer_init(&dnsbuf, NULL, 0);
+	isc_buffer_initnull(&dnsbuf);
 	isc_buffer_setmctx(&dnsbuf, isc_g_mctx);
 
 	isc_buffer_putmem(&dnsbuf, (void *)request, sizeof(request));

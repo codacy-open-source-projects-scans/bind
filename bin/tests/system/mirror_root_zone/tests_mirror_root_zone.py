@@ -3,15 +3,16 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
 
-
 from isctest.instance import NamedInstance
 from isctest.mark import live_internet_test
+
+import isctest
 
 
 @live_internet_test
@@ -23,4 +24,6 @@ def test_mirror_root_zone(servers: dict[str, NamedInstance]):
     ns1 = servers["ns1"]
     with ns1.watch_log_from_start() as watch_log:
         # TimeoutError is raised if the line is not found and the test will fail.
-        watch_log.wait_for_line("Transfer status: success")
+        watch_log.wait_for_line(
+            isctest.transfer.transfer_message(".", None, "Transfer status: success", 53)
+        )

@@ -1,0 +1,12 @@
+options {
+	{% include_indented "_common/options.conf.j2" %}
+	query-source-v6 none;
+	dnssec-validation no;
+};
+
+{% include "_common/controls.conf.j2" %}
+
+zone "." IN {
+	type hint;
+	file "root.hint";
+};

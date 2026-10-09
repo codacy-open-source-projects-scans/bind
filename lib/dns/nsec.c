@@ -21,6 +21,7 @@
 #include <isc/util.h>
 
 #include <dns/db.h>
+#include <dns/name.h>
 #include <dns/nsec.h>
 #include <dns/rdata.h>
 #include <dns/rdatalist.h>
@@ -113,13 +114,12 @@ dns_nsec_buildrdata(dns_db_t *db, dns_dbversion_t *version, dns_dbnode_t *node,
 	memset(buffer, 0, DNS_NSEC_BUFFERSIZE);
 	dns_name_toregion(nextname, &r);
 	memmove(buffer, r.base, r.length);
-	r.base = buffer;
 	/*
 	 * Use the end of the space for a raw bitmap leaving enough
 	 * space for the window identifiers and length octets.
 	 */
-	bm = r.base + r.length + 512;
-	nsec_bits = r.base + r.length;
+	bm = buffer + r.length + 512;
+	nsec_bits = buffer + r.length;
 	dns_nsec_setbit(bm, dns_rdatatype_rrsig, 1);
 	dns_nsec_setbit(bm, dns_rdatatype_nsec, 1);
 	max_type = dns_rdatatype_nsec;
@@ -157,7 +157,10 @@ dns_nsec_buildrdata(dns_db_t *db, dns_dbversion_t *version, dns_dbnode_t *node,
 
 	nsec_bits += dns_nsec_compressbitmap(nsec_bits, bm, max_type);
 
-	r.length = (unsigned int)(nsec_bits - r.base);
+	r = (isc_region_t){
+		.base = buffer,
+		.length = (unsigned int)(nsec_bits - buffer),
+	};
 	INSIST(r.length <= DNS_NSEC_BUFFERSIZE);
 	dns_rdata_fromregion(rdata, dns_db_class(db), dns_rdatatype_nsec, &r);
 
@@ -205,7 +208,7 @@ dns_nsec_typepresent(dns_rdata_t *nsec, dns_rdatatype_t type) {
 	REQUIRE(nsec->type == dns_rdatatype_nsec);
 
 	/* This should never fail */
-	result = dns_rdata_tostruct(nsec, &nsecstruct, NULL);
+	result = dns_rdata_tostruct(nsec, &nsecstruct);
 	INSIST(result == ISC_R_SUCCESS);
 
 	present = false;
@@ -228,7 +231,6 @@ dns_nsec_typepresent(dns_rdata_t *nsec, dns_rdatatype_t type) {
 		}
 		break;
 	}
-	dns_rdata_freestruct(&nsecstruct);
 	return present;
 }
 
@@ -261,7 +263,7 @@ dns_nsec_nseconly(dns_db_t *db, dns_dbversion_t *version, dns_diff_t *diff,
 		dns_rdata_t rdata = DNS_RDATA_INIT;
 
 		dns_rdataset_current(&rdataset, &rdata);
-		result = dns_rdata_tostruct(&rdata, &dnskey, NULL);
+		result = dns_rdata_tostruct(&rdata, &dnskey);
 		RUNTIME_CHECK(result == ISC_R_SUCCESS);
 
 		if (dnskey.algorithm == DST_ALG_RSAMD5 ||
@@ -306,10 +308,10 @@ dns_nsec_nseconly(dns_db_t *db, dns_dbversion_t *version, dns_diff_t *diff,
  * Return ISC_R_IGNORE when the NSEC is not the appropriate one.
  */
 isc_result_t
-dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
-		       const dns_name_t *nsecname, dns_rdataset_t *nsecset,
-		       bool *exists, bool *data, dns_name_t *wild,
-		       dns_nseclog_t logit, void *arg) {
+dns__nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
+			const dns_name_t *nsecname, dns_rdataset_t *nsecset,
+			bool *exists, bool *data, dns_name_t *wild,
+			dns_nseclog_t logit, void *arg) {
 	int order;
 	dns_rdata_t rdata = DNS_RDATA_INIT;
 	isc_result_t result;
@@ -380,8 +382,7 @@ dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
 			(*logit)(arg, ISC_LOG_DEBUG(3), "ignoring child nsec");
 			return ISC_R_IGNORE;
 		}
-		if (type == dns_rdatatype_cname || type == dns_rdatatype_nxt ||
-		    type == dns_rdatatype_nsec || type == dns_rdatatype_key ||
+		if (type == dns_rdatatype_cname || type == dns_rdatatype_nsec ||
 		    !dns_nsec_typepresent(&rdata, dns_rdatatype_cname))
 		{
 			*exists = true;
@@ -417,10 +418,21 @@ dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
 		return DNS_R_DNAME;
 	}
 
-	RETERR(dns_rdata_tostruct(&rdata, &nsec, NULL));
+	if (relation != dns_namereln_subdomain &&
+	    dns_nsec_typepresent(&rdata, dns_rdatatype_soa))
+	{
+		/*
+		 * An NSEC with an SOA in the bitmap can only cover
+		 * names that are subdomains of the owner.
+		 */
+		(*logit)(arg, ISC_LOG_DEBUG(3),
+			 "ignoring nsec with SOA covering non-subdomain");
+		return ISC_R_IGNORE;
+	}
+
+	RETERR(dns_rdata_tostruct(&rdata, &nsec));
 	relation = dns_name_fullcompare(&nsec.next, name, &order, &nlabels);
 	if (order == 0) {
-		dns_rdata_freestruct(&nsec);
 		(*logit)(arg, ISC_LOG_DEBUG(3),
 			 "ignoring nsec matches next name");
 		return ISC_R_IGNORE;
@@ -430,7 +442,6 @@ dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
 		/*
 		 * The name is not within the NSEC range.
 		 */
-		dns_rdata_freestruct(&nsec);
 		(*logit)(arg, ISC_LOG_DEBUG(3),
 			 "ignoring nsec because name is past end of range");
 		return ISC_R_IGNORE;
@@ -439,7 +450,6 @@ dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
 	if (order > 0 && relation == dns_namereln_subdomain) {
 		(*logit)(arg, ISC_LOG_DEBUG(3),
 			 "nsec proves name exist (empty)");
-		dns_rdata_freestruct(&nsec);
 		*exists = true;
 		*data = false;
 		return ISC_R_SUCCESS;
@@ -458,21 +468,21 @@ dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
 		}
 		result = dns_name_concatenate(dns_wildcardname, &common, wild);
 		if (result != ISC_R_SUCCESS) {
-			dns_rdata_freestruct(&nsec);
 			(*logit)(arg, ISC_LOG_DEBUG(3),
 				 "failure generating wildcard name");
 			return result;
 		}
 	}
-	dns_rdata_freestruct(&nsec);
 	(*logit)(arg, ISC_LOG_DEBUG(3), "nsec range ok");
 	*exists = false;
 	return ISC_R_SUCCESS;
 }
 
 bool
-dns_nsec_requiredtypespresent(dns_rdataset_t *nsecset) {
+dns_nsec_is_legal(dns_rdataset_t *nsecset, const dns_name_t *name) {
 	dns_rdataset_t rdataset = DNS_RDATASET_INIT;
+	dns_rdata_nsec_t nsec;
+	isc_result_t result;
 	bool found = false;
 
 	REQUIRE(DNS_RDATASET_VALID(nsecset));
@@ -483,12 +493,19 @@ dns_nsec_requiredtypespresent(dns_rdataset_t *nsecset) {
 	DNS_RDATASET_FOREACH(&rdataset) {
 		dns_rdata_t rdata = DNS_RDATA_INIT;
 		dns_rdataset_current(&rdataset, &rdata);
-		if (!dns_nsec_typepresent(&rdata, dns_rdatatype_nsec) ||
-		    !dns_nsec_typepresent(&rdata, dns_rdatatype_rrsig))
+
+		/* must never fail */
+		result = dns_rdata_tostruct(&rdata, &nsec);
+		INSIST(result == ISC_R_SUCCESS);
+
+		if (!dns_name_issubdomain(&nsec.next, name) ||
+		    !dns_nsec_typepresent(&rdata, dns_rdatatype_rrsig) ||
+		    !dns_nsec_typepresent(&rdata, dns_rdatatype_nsec))
 		{
 			dns_rdataset_disassociate(&rdataset);
 			return false;
 		}
+
 		found = true;
 	}
 	dns_rdataset_disassociate(&rdataset);

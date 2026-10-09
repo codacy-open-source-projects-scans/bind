@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -12,6 +12,7 @@
 from pathlib import Path
 from re import compile as Re
 
+import errno
 import filecmp
 import os
 import shutil
@@ -28,44 +29,82 @@ pytest.register_assert_rewrite("isctest")
 from isctest.vars.build import SYSTEM_TEST_DIR_GIT_PATH
 
 import isctest
+import isctest.tools.testsock
 
 # pylint: enable=wrong-import-position
 
 # Silence warnings caused by passing a pytest fixture to another fixture.
 # pylint: disable=redefined-outer-name
 
-if sys.version_info[1] < 10:
-    raise RuntimeError("Python 3.10 or newer is required to run system tests.")
-
-isctest.log.init_conftest_logger()
-isctest.log.avoid_duplicated_logs()
-isctest.vars.init_vars()
-
 # ----------------------- Globals definition -----------------------------
 
 FILE_DIR = os.path.abspath(Path(__file__).parent)
 PRIORITY_TESTS = [
-    # Tests that are scheduled first. Speeds up parallel execution.
-    "rpz/",
-    "rpzrecurse/",
-    "serve-stale/",
+    # Ten tests that are scheduled first. Speeds up parallel execution.
+    # Sorted by observed duration (longest first), measured from CI.
     "timeouts/",
-    "upforwd/",
+    "rpzrecurse/",
+    "nsupdate/",
+    "serve_stale/",
+    "doth/",
+    "resolver/",
+    "proxy/",
+    "catz/",
+    "digdelv/",
+    "rpz/",
 ]
+for _p in PRIORITY_TESTS:
+    _dir = os.path.join(FILE_DIR, _p.rstrip("/"))
+    if not os.path.isdir(_dir):
+        raise RuntimeError(
+            f"PRIORITY_TESTS entry {_p!r} does not match a directory: {_dir}"
+        )
+
 PRIORITY_TESTS_RE = Re("|".join(PRIORITY_TESTS))
 SYSTEM_TEST_NAME_RE = Re(f"{SYSTEM_TEST_DIR_GIT_PATH}" + r"/([^/]+)")
-SYMLINK_REPLACEMENT_RE = Re(r"/tests_(.*)\.py")
 
-# ----------------------- Global requirements ----------------------------
+# ---- Fix pytest-xdist loadscope for node IDs containing "::" ----------
 
-isctest.check.is_executable(isctest.vars.ALL["PYTHON"], "Python interpreter required")
-isctest.check.is_executable(isctest.vars.ALL["PERL"], "Perl interpreter required")
-isctest.check.is_executable(
-    isctest.vars.ALL["FEATURETEST"],
-    "Run this first: ninja -C build system-test-dependencies",
-)
+# LoadScopeScheduling._split_scope uses rsplit("::", 1) which breaks when
+# test parameters contain "::" (e.g. IPv6 addresses like "cafe:cafe::cafe").
+# This causes tests from the same file to be assigned to different workers,
+# each paying the full fixture setup cost.  Override to split on ".py::"
+# which is unambiguous.
+# https://github.com/pytest-dev/pytest-xdist/issues/1335
+try:
+    from xdist.scheduler.loadscope import LoadScopeScheduling
+
+    # pylint: disable=protected-access
+    _orig_split_scope = LoadScopeScheduling._split_scope
+
+    def _fixed_split_scope(self, nodeid):
+        if ".py::" in nodeid:
+            return nodeid.split(".py::")[0] + ".py"
+        return _orig_split_scope(self, nodeid)
+
+    LoadScopeScheduling._split_scope = _fixed_split_scope
+    # pylint: enable=protected-access
+except ImportError:
+    pass
 
 # --------------------------- pytest hooks -------------------------------
+
+
+def pytest_configure(config):  # pylint: disable=unused-argument
+    if sys.version_info < (3, 10):
+        raise RuntimeError("Python 3.10 or newer is required to run system tests.")
+
+    isctest.log.init_conftest_logger()
+    isctest.log.avoid_duplicated_logs()
+    isctest.check.is_executable(
+        isctest.vars.ALL["FEATURETEST"],
+        "Run this first: ninja -C build system-test-dependencies",
+    )
+    isctest.vars.init_vars()
+    isctest.check.is_executable(
+        isctest.vars.ALL["PYTHON"], "Python interpreter required"
+    )
+    isctest.check.is_executable(isctest.vars.ALL["PERL"], "Perl interpreter required")
 
 
 def pytest_addoption(parser):
@@ -85,7 +124,7 @@ def pytest_ignore_collect(collection_path):
     # from previous runs could mess with the runner. Also ignore the
     # convenience symlinks to those test directories. In both of those
     # cases, the system test name (directory) contains a hyphen, which
-    # is otherwise and invalid character for a system test name.
+    # is otherwise an invalid character for a system test name.
     match = SYSTEM_TEST_NAME_RE.search(str(collection_path))
     if match is None:
         isctest.log.warning("unexpected test path: %s (ignored)", collection_path)
@@ -95,7 +134,9 @@ def pytest_ignore_collect(collection_path):
 
 
 def pytest_collection_modifyitems(items):
-    """Schedule long-running tests first to get more benefit from parallelism."""
+    """
+    Schedule long-running tests first to get more benefit from parallelism.
+    """
     priority = []
     other = []
     for item in items:
@@ -131,7 +172,9 @@ class NodeResult:
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item):
-    """Hook that is used to expose test results to session (for use in fixtures)."""
+    """
+    Hook that is used to expose test results to session (for use in fixtures).
+    """
     # execute all other hooks to obtain the report object
     outcome = yield
     report = outcome.get_result()
@@ -207,7 +250,9 @@ def module_base_ports(modules):
 
 @pytest.fixture(autouse=True, scope="module")
 def base_port(request, module_base_ports):
-    """Start of the port range assigned to a particular test module."""
+    """
+    Start of the port range assigned to a particular test module.
+    """
     port = module_base_ports[request.fspath]
     isctest.vars.ports.set_base_port(port)
     return port
@@ -235,19 +280,35 @@ def control_port():
 
 @pytest.fixture(scope="module")
 def default_algorithm():
-    return isctest.vars.algorithms.Algorithm.default()
+    return isctest.algorithms.Algorithm.default()
 
 
 @pytest.fixture(scope="module")
-def system_test_name(request):
-    """Name of the system test directory."""
-    path = Path(request.fspath)
-    return path.parent.name
+def system_test_source_dir(request):
+    """
+    Directory holding the system test's files, as tracked in Git.
+    """
+    return Path(request.fspath).parent.resolve()
+
+
+@pytest.fixture(scope="module")
+def system_test_name(system_test_source_dir):
+    """
+    Name of the system test.
+
+    For a test directory directly under bin/tests/system this is just its
+    name.  A test may also live deeper, next to the code it exercises
+    (isctest/asyncserver/tests); then the path components are joined with
+    underscores, which keeps the name usable as a directory and module name.
+    """
+    return "_".join(system_test_source_dir.relative_to(Path(FILE_DIR).resolve()).parts)
 
 
 @pytest.fixture(autouse=True)
 def wait_for_zones_loaded(request, servers):
-    """Wait for all zones to be loaded by specified named instances."""
+    """
+    Wait for all zones to be loaded by specified named instances.
+    """
     instances = request.node.get_closest_marker("requires_zones_loaded")
     if not instances:
         return
@@ -257,9 +318,38 @@ def wait_for_zones_loaded(request, servers):
             watcher.wait_for_line("all zones loaded")
 
 
+@pytest.fixture(autouse=True)
+def named_log_test_markers(request, servers):
+    """
+    Send `rndc null` message with a test ID to each named instance.
+    """
+
+    def mark(event):
+        for server in servers.values():
+            if not isinstance(server, isctest.instance.NamedInstance):
+                continue
+            try:
+                with server.rndc_client(timeout=2) as c:
+                    c.call(f"null ------ {event} {request.node.nodeid} ------")
+            except (
+                OSError,
+                isctest.rndc.RNDCException,
+                isctest.rndc.RNDCProtocolError,
+            ):
+                # best-effort: the instance may be stopped or use a
+                # non-standard control channel
+                pass
+
+    mark("BEGIN")
+    yield
+    mark("END")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def configure_algorithm_set(request):
-    """Configure the algorithm set to use in tests."""
+    """
+    Configure the algorithm set to use in tests.
+    """
     mark = request.node.get_closest_marker("algorithm_set")
     if not mark:
         name = None
@@ -270,7 +360,9 @@ def configure_algorithm_set(request):
 
 @pytest.fixture(autouse=True)
 def logger(request, system_test_name):
-    """Sets up logging facility specific to a particular test."""
+    """
+    Sets up logging facility specific to a particular test.
+    """
     isctest.log.init_test_logger(system_test_name, request.node.name)
     yield
     isctest.log.deinit_test_logger()
@@ -280,10 +372,15 @@ def logger(request, system_test_name):
 def expected_artifacts(request):
     common_artifacts = [
         ".libs/*",  # possible build artifacts, see GL #5055
+        "ans*/ans.run",
+        "ans*/keys",
+        "ans*/zones",
+        "ns*/keys",
         "ns*/named*.conf",
         "ns*/named.memstats",
         "ns*/named.run",
         "ns*/named.run.prev",
+        "ns*/zones",
         "core.[0-9]*-backtrace.txt",
         "core.[0-9]*.gz",
         "pytest.log.txt",
@@ -309,7 +406,9 @@ def expected_artifacts(request):
 
 
 @pytest.fixture(scope="module")
-def system_test_dir(request, system_test_name, expected_artifacts):
+def system_test_dir(
+    request, system_test_name, system_test_source_dir, expected_artifacts
+):
     """
     Temporary directory for executing the test.
 
@@ -319,8 +418,10 @@ def system_test_dir(request, system_test_name, expected_artifacts):
     """
 
     def get_test_result():
-        """Aggregate test results from all individual tests from this module
-        into a single result: failed > skipped > passed."""
+        """
+        Aggregate test results from all individual tests from this module
+        into a single result: failed > skipped > passed.
+        """
         try:
             all_test_results = request.session.test_results
         except AttributeError:
@@ -388,12 +489,12 @@ def system_test_dir(request, system_test_name, expected_artifacts):
         tempfile.mkdtemp(prefix=f"{system_test_name}-tmp-", dir=system_test_root)
     )
     shutil.rmtree(testdir)
-    shutil.copytree(system_test_root / system_test_name, testdir)
+    shutil.copytree(system_test_source_dir, testdir)
     isctest.vars.dirs.set_system_test_name(testdir.name)
 
     # Create a convenience symlink with a stable and predictable name
-    module_name = SYMLINK_REPLACEMENT_RE.sub(r"-\1", str(request.node.path))
-    symlink_dst = system_test_root / module_name
+    module_name = request.node.path.stem.removeprefix("tests_")
+    symlink_dst = system_test_root / f"{system_test_name}-{module_name}"
     symlink_dst.unlink(missing_ok=True)
     symlink_dst.symlink_to(os.path.relpath(testdir, start=system_test_root))
 
@@ -420,7 +521,7 @@ def system_test_dir(request, system_test_name, expected_artifacts):
         result = get_test_result()
 
         if result == "passed":
-            check_artifacts(system_test_root / system_test_name, testdir)
+            check_artifacts(system_test_source_dir, testdir)
 
         # Clean temporary dir unless it should be kept
         keep = False
@@ -461,7 +562,9 @@ def templates(system_test_dir: Path):
 
 @pytest.fixture(scope="module")
 def run_tests_sh(system_test_dir):
-    """Utility function to execute tests.sh as a python test."""
+    """
+    Utility function to execute tests.sh as a python test.
+    """
 
     def run_tests():
         isctest.run.shell(f"{system_test_dir}/tests.sh")
@@ -498,21 +601,15 @@ def system_test(
     """
 
     def check_net_interfaces():
+        port = int(os.environ["PORT"])
         try:
-            isctest.run.perl(
-                f"{os.environ['srcdir']}/testsock.pl", ["-p", os.environ["PORT"]]
-            )
-        except subprocess.CalledProcessError as exc:
-            isctest.log.error("testsock.pl: exited with code %d", exc.returncode)
+            for check_port in range(port, port + isctest.vars.ports.PORTS_PER_TEST):
+                isctest.tools.testsock.check_ipv4_interfaces(check_port)
+        except OSError as exc:
+            isctest.log.error("testsock: %s", exc)
+            if exc.errno == errno.EADDRINUSE:
+                raise RuntimeError(f"test port range is in use: {exc}") from exc
             pytest.skip("Network interface aliases not set up.")
-
-    def check_prerequisites():
-        try:
-            isctest.run.shell(f"{system_test_dir}/prereq.sh")
-        except FileNotFoundError:
-            pass  # prereq.sh is optional
-        except subprocess.CalledProcessError:
-            pytest.skip("Prerequisites missing.")
 
     def setup_test():
         template_data = None
@@ -573,7 +670,6 @@ def system_test(
 
     # Perform checks which may skip this test.
     check_net_interfaces()
-    check_prerequisites()
 
     # Store the fact that this fixture hasn't successfully finished yet.
     # This is checked before temporary directory teardown to decide whether
@@ -597,12 +693,16 @@ def servers(system_test_dir):
     instances = {}
     for entry in system_test_dir.rglob("*"):
         if entry.is_dir():
-            try:
-                dir_name = entry.name
-                instance = isctest.instance.NamedInstance(dir_name)
-                instances[dir_name] = instance
-            except ValueError:
-                continue
+            dir_name = entry.name
+            for instance_class in (
+                isctest.instance.NamedInstance,
+                isctest.instance.AnsInstance,
+            ):
+                try:
+                    instances[dir_name] = instance_class(dir_name)
+                    break
+                except ValueError:
+                    continue
     return instances
 
 
@@ -654,3 +754,63 @@ def ns9(servers):
 @pytest.fixture(scope="module")
 def ns10(servers):
     return servers["ns10"]
+
+
+@pytest.fixture(scope="module")
+def ns11(servers):
+    return servers["ns11"]
+
+
+@pytest.fixture(scope="module")
+def ans1(servers):
+    return servers["ans1"]
+
+
+@pytest.fixture(scope="module")
+def ans2(servers):
+    return servers["ans2"]
+
+
+@pytest.fixture(scope="module")
+def ans3(servers):
+    return servers["ans3"]
+
+
+@pytest.fixture(scope="module")
+def ans4(servers):
+    return servers["ans4"]
+
+
+@pytest.fixture(scope="module")
+def ans5(servers):
+    return servers["ans5"]
+
+
+@pytest.fixture(scope="module")
+def ans6(servers):
+    return servers["ans6"]
+
+
+@pytest.fixture(scope="module")
+def ans7(servers):
+    return servers["ans7"]
+
+
+@pytest.fixture(scope="module")
+def ans8(servers):
+    return servers["ans8"]
+
+
+@pytest.fixture(scope="module")
+def ans9(servers):
+    return servers["ans9"]
+
+
+@pytest.fixture(scope="module")
+def ans10(servers):
+    return servers["ans10"]
+
+
+@pytest.fixture(scope="module")
+def ans11(servers):
+    return servers["ans11"]

@@ -28,6 +28,8 @@
 #include <isc/lib.h>
 #include <isc/managers.h>
 #include <isc/refcount.h>
+#include <isc/time.h>
+#include <isc/timer.h>
 #include <isc/tls.h>
 #include <isc/util.h>
 #include <isc/uv.h>
@@ -72,6 +74,7 @@ static dns_transport_t *tls_transport = NULL;
 static dns_transport_list_t *transport_list = NULL;
 
 static isc_nmsocket_t *sock = NULL;
+static isc_nm_udplistener_t *udp_listener = NULL;
 
 const struct in6_addr in6addr_blackhole = { { { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 						0, 0, 0, 0, 1 } } };
@@ -446,6 +449,41 @@ response_shutdown(isc_result_t eresult, isc_region_t *region ISC_ATTR_UNUSED,
 }
 
 static void
+response_mismatch(isc_result_t eresult, isc_region_t *region ISC_ATTR_UNUSED,
+		  void *arg) {
+	test_dispatch_t *test = arg;
+
+	assert_int_equal(eresult, DNS_R_MISMATCH);
+
+	test_dispatch_shutdown(test);
+}
+
+static void
+nameserver_mismatch(isc_nmhandle_t *handle, isc_result_t eresult,
+		    isc_region_t *region, void *arg ISC_ATTR_UNUSED) {
+	/*
+	 * Reply with a single response whose DNS message id has been
+	 * flipped; the dispatcher must escalate immediately rather than
+	 * waiting for a "correct" id to arrive.
+	 */
+	static unsigned char buf[16];
+	static isc_region_t resp;
+
+	if (eresult != ISC_R_SUCCESS) {
+		return;
+	}
+
+	memmove(buf, region->base, 12);
+	memset(buf + 12, 0, 4);
+	buf[0] ^= 0xff; /* flip id high byte */
+	buf[1] ^= 0xff; /* flip id low byte */
+	buf[2] |= 0x80; /* qr=1 */
+	resp.base = buf;
+	resp.length = sizeof(buf);
+	isc_nm_send(handle, &resp, server_senddone, NULL);
+}
+
+static void
 response_timeout(isc_result_t eresult, isc_region_t *region ISC_ATTR_UNUSED,
 		 void *arg) {
 	test_dispatch_t *test = arg;
@@ -585,6 +623,15 @@ stop_listening(void *arg) {
 	assert_null(sock);
 }
 
+static void
+stop_udp_listening(void *arg) {
+	UNUSED(arg);
+
+	isc_nm_udplistener_stop(udp_listener);
+	isc_nm_udplistener_detach(&udp_listener);
+	assert_null(udp_listener);
+}
+
 ISC_LOOP_TEST_IMPL(dispatch_timeout_tcp_response) {
 	isc_result_t result;
 	test_dispatch_t *test = isc_mem_get(isc_g_mctx, sizeof(*test));
@@ -702,11 +749,11 @@ ISC_LOOP_TEST_IMPL(dispatch_timeout_udp_response) {
 
 	/* Server */
 	result = isc_nm_listenudp(ISC_NM_LISTEN_ONE, &udp_server_addr,
-				  noop_nameserver, NULL, &sock);
+				  noop_nameserver, NULL, &udp_listener);
 	assert_int_equal(result, ISC_R_SUCCESS);
 
 	/* ensure we stop listening after the test is done */
-	isc_loop_teardown(isc_loop_main(), stop_listening, sock);
+	isc_loop_teardown(isc_loop_main(), stop_udp_listening, udp_listener);
 
 	/* Client */
 	result = dns_dispatchmgr_create(isc_g_mctx, &test->dispatchmgr);
@@ -734,10 +781,10 @@ ISC_LOOP_TEST_IMPL(dispatch_getnext) {
 
 	/* Server */
 	result = isc_nm_listenudp(ISC_NM_LISTEN_ONE, &udp_server_addr,
-				  nameserver, NULL, &sock);
+				  nameserver, NULL, &udp_listener);
 	assert_int_equal(result, ISC_R_SUCCESS);
 
-	isc_loop_teardown(isc_loop_main(), stop_listening, sock);
+	isc_loop_teardown(isc_loop_main(), stop_udp_listening, udp_listener);
 
 	/* Client */
 	testdata.region.base = testdata.message;
@@ -754,6 +801,47 @@ ISC_LOOP_TEST_IMPL(dispatch_getnext) {
 				  T_CLIENT_CONNECT, T_CLIENT_INIT,
 				  &udp_server_addr, NULL, NULL, connected,
 				  client_senddone, response_getnext, test,
+				  &test->id, &test->dispentry);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	testdata.message[0] = (test->id >> 8) & 0xff;
+	testdata.message[1] = test->id & 0xff;
+
+	dns_dispatch_connect(test->dispentry);
+}
+
+/*
+ * Verify that a UDP response carrying the wrong DNS message id causes the
+ * dispatcher to deliver DNS_R_MISMATCH to the response callback, instead
+ * of silently waiting for the correct id to arrive.
+ */
+ISC_LOOP_TEST_IMPL(dispatch_mismatch_tcp) {
+	isc_result_t result;
+	test_dispatch_t *test = isc_mem_get(isc_g_mctx, sizeof(*test));
+	*test = (test_dispatch_t){ 0 };
+
+	/* Server: replies with a single wrong-id response. */
+	result = isc_nm_listenudp(ISC_NM_LISTEN_ONE, &udp_server_addr,
+				  nameserver_mismatch, NULL, &udp_listener);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	isc_loop_teardown(isc_loop_main(), stop_udp_listening, udp_listener);
+
+	/* Client */
+	testdata.region.base = testdata.message;
+	testdata.region.length = sizeof(testdata.message);
+
+	result = dns_dispatchmgr_create(isc_g_mctx, &test->dispatchmgr);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	result = dns_dispatch_createudp(test->dispatchmgr, &udp_connect_addr,
+					&test->dispatch);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	result = dns_dispatch_add(test->dispatch, isc_loop_main(), 0,
+				  T_CLIENT_CONNECT, T_CLIENT_INIT,
+				  &udp_server_addr, NULL, NULL, connected,
+				  client_senddone, response_mismatch, test,
 				  &test->id, &test->dispentry);
 	assert_int_equal(result, ISC_R_SUCCESS);
 
@@ -796,8 +884,167 @@ ISC_LOOP_TEST_IMPL(dispatch_sharedtcp) {
 	dns_dispatch_connect(test->dispentry);
 }
 
+/*
+ * Regression test for a reused outgoing TCP connection that the peer closes
+ * while it is idle.  The connection must be kept under read while idle so the
+ * close is noticed and the dead dispatch is dropped from the reuse pool;
+ * otherwise the next query would be handed the dead connection and fail.
+ */
+static test_dispatch_t *reuse_test1 = NULL;
+static isc_timer_t *reuse_timer = NULL;
+
+static void
+server_senddone_close(isc_nmhandle_t *handle, isc_result_t eresult, void *arg) {
+	isc_nmhandle_t *sendhandle = arg;
+
+	UNUSED(eresult);
+
+	/*
+	 * Drop the server side of the connection right after answering, to
+	 * mimic a forwarder (e.g. a DoT resolver) that closes idle
+	 * connections.
+	 */
+	isc_nmhandle_close(handle);
+	isc_nmhandle_detach(&sendhandle);
+}
+
+static void
+nameserver_close(isc_nmhandle_t *handle, isc_result_t eresult,
+		 isc_region_t *region, void *arg ISC_ATTR_UNUSED) {
+	isc_region_t response;
+	static unsigned char buf[16];
+	isc_nmhandle_t *sendhandle = NULL;
+
+	if (eresult != ISC_R_SUCCESS) {
+		return;
+	}
+
+	memmove(buf, region->base, 12);
+	memset(buf + 12, 0, 4);
+	buf[2] |= 0x80; /* qr=1 */
+
+	response.base = buf;
+	response.length = sizeof(buf);
+
+	isc_nmhandle_attach(handle, &sendhandle);
+	isc_nm_send(sendhandle, &response, server_senddone_close, sendhandle);
+}
+
+static void
+reuse_query2(void *arg ISC_ATTR_UNUSED) {
+	isc_result_t result;
+	test_dispatch_t *test2 = isc_mem_get(isc_g_mctx, sizeof(*test2));
+
+	*test2 = (test_dispatch_t){
+		.dispatchmgr = dns_dispatchmgr_ref(reuse_test1->dispatchmgr),
+	};
+
+	isc_timer_destroy(&reuse_timer);
+
+	testdata.region.base = testdata.message;
+	testdata.region.length = sizeof(testdata.message);
+
+	/*
+	 * Create the dispatch for the second query.  This inspects the reuse
+	 * pool: the dispatch from the first query must no longer be offered
+	 * (it was either removed or marked canceled when the peer closed it),
+	 * so this gets a fresh connection.
+	 */
+	result = dns_dispatch_createtcp(
+		test2->dispatchmgr, &tcp_connect_addr, &tcp_server_addr, NULL,
+		DNS_DISPATCHTYPE_RESOLVER, 0, &test2->dispatch);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	result = dns_dispatch_add(test2->dispatch, isc_loop_main(), 0,
+				  T_CLIENT_CONNECT, T_CLIENT_INIT,
+				  &tcp_server_addr, NULL, NULL, connected,
+				  client_senddone, response_shutdown, test2,
+				  &test2->id, &test2->dispentry);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	testdata.message[0] = (test2->id >> 8) & 0xff;
+	testdata.message[1] = test2->id & 0xff;
+
+	dns_dispatch_connect(test2->dispentry);
+
+	/*
+	 * Now release the lingering reference from the first query.  Keeping
+	 * it until after the createtcp above ensures the dead dispatch is
+	 * still around to be (wrongly) reused if the fix were absent.
+	 */
+	dns_dispatch_detach(&reuse_test1->dispatch);
+	dns_dispatchmgr_detach(&reuse_test1->dispatchmgr);
+	isc_mem_put(isc_g_mctx, reuse_test1, sizeof(*reuse_test1));
+}
+
+static void
+response_reuse(isc_result_t eresult, isc_region_t *region ISC_ATTR_UNUSED,
+	       void *arg) {
+	test_dispatch_t *test = arg;
+	isc_interval_t interval;
+
+	assert_int_equal(eresult, ISC_R_SUCCESS);
+
+	/*
+	 * Finish the first query but keep a reference on its dispatch, as an
+	 * overlapping query would, so the connection lingers in the reuse pool
+	 * after going idle.
+	 */
+	dns_dispatch_done(&test->dispentry);
+	reuse_test1 = test;
+
+	/*
+	 * Defer the second query so the server's close of the idle connection
+	 * is processed first.
+	 */
+	isc_interval_set(&interval, 1, 0);
+	isc_timer_create(isc_loop_main(), reuse_query2, NULL, &reuse_timer);
+	isc_timer_start(reuse_timer, isc_timertype_once, &interval);
+}
+
+ISC_LOOP_TEST_IMPL(dispatch_tcp_reuse_after_close) {
+	isc_result_t result;
+	test_dispatch_t *test = isc_mem_get(isc_g_mctx, sizeof(*test));
+	*test = (test_dispatch_t){ 0 };
+
+	/* Server: answer one query per connection, then close it. */
+	result = isc_nm_listenstreamdns(
+		ISC_NM_LISTEN_ONE, &tcp_server_addr, nameserver_close, NULL,
+		accept_cb, NULL, 0, NULL, NULL, ISC_NM_PROXY_NONE, &sock);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	isc_loop_teardown(isc_loop_main(), stop_listening, sock);
+
+	/* Client */
+	testdata.region.base = testdata.message;
+	testdata.region.length = sizeof(testdata.message);
+
+	result = dns_dispatchmgr_create(isc_g_mctx, &test->dispatchmgr);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	dns_dispatchmgr_setreusetimeout(test->dispatchmgr, 5000);
+
+	result = dns_dispatch_createtcp(
+		test->dispatchmgr, &tcp_connect_addr, &tcp_server_addr, NULL,
+		DNS_DISPATCHTYPE_RESOLVER, 0, &test->dispatch);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	result = dns_dispatch_add(test->dispatch, isc_loop_main(), 0,
+				  T_CLIENT_CONNECT, T_CLIENT_INIT,
+				  &tcp_server_addr, NULL, NULL, connected,
+				  client_senddone, response_reuse, test,
+				  &test->id, &test->dispentry);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	testdata.message[0] = (test->id >> 8) & 0xff;
+	testdata.message[1] = test->id & 0xff;
+
+	dns_dispatch_connect(test->dispentry);
+}
+
 ISC_TEST_LIST_START
 ISC_TEST_ENTRY_CUSTOM(dispatch_sharedtcp, setup_test, teardown_test)
+ISC_TEST_ENTRY_CUSTOM(dispatch_tcp_reuse_after_close, setup_test, teardown_test)
 ISC_TEST_ENTRY_CUSTOM(dispatch_timeout_udp_response, setup_test, teardown_test)
 ISC_TEST_ENTRY_CUSTOM(dispatchset_create, setup_test, teardown_test)
 ISC_TEST_ENTRY_CUSTOM(dispatchset_get, setup_test, teardown_test)
@@ -806,6 +1053,7 @@ ISC_TEST_ENTRY_CUSTOM(dispatch_timeout_tcp_connect, setup_test, teardown_test)
 ISC_TEST_ENTRY_CUSTOM(dispatch_tcp_response, setup_test, teardown_test)
 ISC_TEST_ENTRY_CUSTOM(dispatch_tls_response, setup_test, teardown_test)
 ISC_TEST_ENTRY_CUSTOM(dispatch_getnext, setup_test, teardown_test)
+ISC_TEST_ENTRY_CUSTOM(dispatch_mismatch_tcp, setup_test, teardown_test)
 ISC_TEST_LIST_END
 
 ISC_TEST_MAIN

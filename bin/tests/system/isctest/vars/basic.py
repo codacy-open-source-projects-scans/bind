@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -44,10 +44,8 @@ BASIC_VARS = {
     "SIGNER": f"{BUILD_VARS['TOP_BUILDDIR']}/dnssec-signzone",
     "TSIGKEYGEN": f"{BUILD_VARS['TOP_BUILDDIR']}/tsig-keygen",
     "VERIFY": f"{BUILD_VARS['TOP_BUILDDIR']}/dnssec-verify",
-    "WIRETEST": f"{BUILD_VARS['TOP_BUILDDIR']}/wire-test",
+    "WIREFORMAT": f"{BUILD_VARS['TOP_BUILDDIR']}/named-wireformat",
     "BIGKEY": f"{BUILD_VARS['TOP_BUILDDIR']}/bigkey",
-    "GENCHECK": f"{BUILD_VARS['TOP_BUILDDIR']}/gencheck",
-    "PIPEQUERIES": f"{BUILD_VARS['TOP_BUILDDIR']}/pipequeries",
     "TMPDIR": os.getenv("TMPDIR", "/tmp"),
     "KRB5_CONFIG": "/dev/null",  # we don't want a KRB5_CONFIG setting breaking the tests
     "LC_ALL": "C",

@@ -18,31 +18,7 @@
 
 #include <dst/dst.h>
 
-#define RRTYPE_KEY_ATTRIBUTES \
-	(DNS_RDATATYPEATTR_ATCNAME | DNS_RDATATYPEATTR_ZONECUTAUTH)
-
-/*
- * RFC 2535 section 3.1.2 says that if bits 0-1 of the Flags field are
- * both set, it means there is no key information and the RR stops after
- * the algorithm octet.  However, this only applies to KEY records, as
- * indicated by the specifications of the RR types based on KEY:
- *
- *     CDNSKEY - RFC 7344
- *     DNSKEY - RFC 4034
- *     RKEY - draft-reid-dnsext-rkey-00
- */
-static bool
-generic_key_nokey(dns_rdatatype_t type, unsigned int flags) {
-	switch (type) {
-	case dns_rdatatype_cdnskey:
-	case dns_rdatatype_dnskey:
-	case dns_rdatatype_rkey:
-		return false;
-	case dns_rdatatype_key:
-	default:
-		return (flags & DNS_KEYFLAG_TYPEMASK) == DNS_KEYTYPE_NOKEY;
-	}
-}
+#define RRTYPE_KEY_ATTRIBUTES (0)
 
 static isc_result_t
 generic_fromtext_key(ARGS_FROMTEXT) {
@@ -77,11 +53,6 @@ generic_fromtext_key(ARGS_FROMTEXT) {
 				      false));
 	RETTOK(dns_secalg_fromtext(&alg, &token.value.as_textregion));
 	RETERR(mem_tobuffer(target, &alg, 1));
-
-	/* No Key? */
-	if (generic_key_nokey(type, flags)) {
-		return ISC_R_SUCCESS;
-	}
 
 	/*
 	 * Save the current used value. It will become the current
@@ -149,11 +120,6 @@ generic_totext_key(ARGS_TOTEXT) {
 	isc_region_consume(&sr, 1);
 	RETERR(str_totext(buf, target));
 
-	/* No Key? */
-	if (generic_key_nokey(rdata->type, flags)) {
-		return ISC_R_SUCCESS;
-	}
-
 	if ((tctx->flags & DNS_STYLEFLAG_RRCOMMENT) != 0 &&
 	    algorithm == DNS_KEYALG_PRIVATEDNS)
 	{
@@ -167,7 +133,7 @@ generic_totext_key(ARGS_TOTEXT) {
 		const unsigned char *in = sr.base + 1;
 		ASN1_OBJECT *obj = d2i_ASN1_OBJECT(NULL, &in, *sr.base);
 		INSIST(obj != NULL);
-		int n = i2t_ASN1_OBJECT(algbuf, sizeof(buf), obj);
+		int n = i2t_ASN1_OBJECT(algbuf, sizeof(algbuf), obj);
 		ASN1_OBJECT_free(obj);
 		if (n == -1 || (size_t)n >= sizeof(algbuf)) {
 			dns_secalg_format((dns_secalg_t)algorithm, algbuf,
@@ -249,9 +215,6 @@ generic_fromwire_key(ARGS_FROMWIRE) {
 	isc_region_consume(&sr, 4);
 	isc_buffer_forward(source, 4);
 
-	if (generic_key_nokey(type, flags)) {
-		return ISC_R_SUCCESS;
-	}
 	if (sr.length == 0) {
 		return ISC_R_UNEXPECTEDEND;
 	}
@@ -378,25 +341,8 @@ generic_tostruct_key(ARGS_TOSTRUCT) {
 
 	/* Data */
 	key->datalen = sr.length;
-	key->data = mem_maybedup(mctx, sr.base, key->datalen);
-	key->mctx = mctx;
+	key->data = sr.base;
 	return ISC_R_SUCCESS;
-}
-
-static void
-generic_freestruct_key(ARGS_FREESTRUCT) {
-	dns_rdata_key_t *key = (dns_rdata_key_t *)source;
-
-	REQUIRE(key != NULL);
-
-	if (key->mctx == NULL) {
-		return;
-	}
-
-	if (key->data != NULL) {
-		isc_mem_free(key->mctx, key->data);
-	}
-	key->mctx = NULL;
 }
 
 static isc_result_t
@@ -417,16 +363,6 @@ tostruct_key(ARGS_TOSTRUCT) {
 	DNS_RDATACOMMON_INIT(key, rdata->type, rdata->rdclass);
 
 	return generic_tostruct_key(CALL_TOSTRUCT);
-}
-
-static void
-freestruct_key(ARGS_FREESTRUCT) {
-	dns_rdata_key_t *key = (dns_rdata_key_t *)source;
-
-	REQUIRE(key != NULL);
-	REQUIRE(key->common.rdtype == dns_rdatatype_key);
-
-	generic_freestruct_key(source);
 }
 
 static isc_result_t

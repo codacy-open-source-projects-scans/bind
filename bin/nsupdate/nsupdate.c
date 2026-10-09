@@ -383,6 +383,7 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 	uint16_t digestbits = 0;
 	isc_result_t result;
 	char buf[20];
+	const char *bits = NULL;
 
 	REQUIRE(hmac_alg != NULL);
 	REQUIRE(hmacstr != NULL);
@@ -397,9 +398,11 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 
 	if (strcasecmp(buf, "hmac-md5") == 0) {
 		*hmac_alg = DST_ALG_HMACMD5;
-	} else if (strncasecmp(buf, "hmac-md5-", 9) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-md5-")) !=
+		   NULL)
+	{
 		*hmac_alg = DST_ALG_HMACMD5;
-		result = isc_parse_uint16(&digestbits, &buf[9], 10);
+		result = isc_parse_uint16(&digestbits, bits, 10);
 		if (result != ISC_R_SUCCESS || digestbits > 128) {
 			error("digest-bits out of range [0..128]");
 			return false;
@@ -407,9 +410,11 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 		*digestbitsp = (digestbits + 7) & ~0x7U;
 	} else if (strcasecmp(buf, "hmac-sha1") == 0) {
 		*hmac_alg = DST_ALG_HMACSHA1;
-	} else if (strncasecmp(buf, "hmac-sha1-", 10) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha1-")) !=
+		   NULL)
+	{
 		*hmac_alg = DST_ALG_HMACSHA1;
-		result = isc_parse_uint16(&digestbits, &buf[10], 10);
+		result = isc_parse_uint16(&digestbits, bits, 10);
 		if (result != ISC_R_SUCCESS || digestbits > 160) {
 			error("digest-bits out of range [0..160]");
 			return false;
@@ -417,9 +422,11 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 		*digestbitsp = (digestbits + 7) & ~0x7U;
 	} else if (strcasecmp(buf, "hmac-sha224") == 0) {
 		*hmac_alg = DST_ALG_HMACSHA224;
-	} else if (strncasecmp(buf, "hmac-sha224-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha224-")) !=
+		   NULL)
+	{
 		*hmac_alg = DST_ALG_HMACSHA224;
-		result = isc_parse_uint16(&digestbits, &buf[12], 10);
+		result = isc_parse_uint16(&digestbits, bits, 10);
 		if (result != ISC_R_SUCCESS || digestbits > 224) {
 			error("digest-bits out of range [0..224]");
 			return false;
@@ -427,9 +434,11 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 		*digestbitsp = (digestbits + 7) & ~0x7U;
 	} else if (strcasecmp(buf, "hmac-sha256") == 0) {
 		*hmac_alg = DST_ALG_HMACSHA256;
-	} else if (strncasecmp(buf, "hmac-sha256-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha256-")) !=
+		   NULL)
+	{
 		*hmac_alg = DST_ALG_HMACSHA256;
-		result = isc_parse_uint16(&digestbits, &buf[12], 10);
+		result = isc_parse_uint16(&digestbits, bits, 10);
 		if (result != ISC_R_SUCCESS || digestbits > 256) {
 			error("digest-bits out of range [0..256]");
 			return false;
@@ -437,9 +446,11 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 		*digestbitsp = (digestbits + 7) & ~0x7U;
 	} else if (strcasecmp(buf, "hmac-sha384") == 0) {
 		*hmac_alg = DST_ALG_HMACSHA384;
-	} else if (strncasecmp(buf, "hmac-sha384-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha384-")) !=
+		   NULL)
+	{
 		*hmac_alg = DST_ALG_HMACSHA384;
-		result = isc_parse_uint16(&digestbits, &buf[12], 10);
+		result = isc_parse_uint16(&digestbits, bits, 10);
 		if (result != ISC_R_SUCCESS || digestbits > 384) {
 			error("digest-bits out of range [0..384]");
 			return false;
@@ -447,9 +458,11 @@ parse_hmac(const char *hmacstr, size_t len, dst_algorithm_t *hmac_alg,
 		*digestbitsp = (digestbits + 7) & ~0x7U;
 	} else if (strcasecmp(buf, "hmac-sha512") == 0) {
 		*hmac_alg = DST_ALG_HMACSHA512;
-	} else if (strncasecmp(buf, "hmac-sha512-", 12) == 0) {
+	} else if ((bits = isc_string_casestripprefix(buf, "hmac-sha512-")) !=
+		   NULL)
+	{
 		*hmac_alg = DST_ALG_HMACSHA512;
-		result = isc_parse_uint16(&digestbits, &buf[12], 10);
+		result = isc_parse_uint16(&digestbits, bits, 10);
 		if (result != ISC_R_SUCCESS || digestbits > 512) {
 			error("digest-bits out of range [0..512]");
 			return false;
@@ -1024,7 +1037,7 @@ pre_parse_args(int argc, char **argv) {
 					continue;
 				}
 				dns_rdatatype_format(t, buf, sizeof(buf));
-				if (strncmp(buf, "TYPE", 4) != 0) {
+				if (!isc_string_hasprefix(buf, "TYPE")) {
 					fprintf(stdout, "%s\n", buf);
 				}
 			}
@@ -1037,7 +1050,7 @@ pre_parse_args(int argc, char **argv) {
 					continue;
 				}
 				dns_rdatatype_format(t, buf, sizeof(buf));
-				if (strncmp(buf, "TYPE", 4) != 0) {
+				if (!isc_string_hasprefix(buf, "TYPE")) {
 					fprintf(stdout, "%s\n", buf);
 				}
 			}
@@ -1268,7 +1281,7 @@ parse_args(int argc, char **argv) {
 }
 
 static uint16_t
-parse_name(char **cmdlinep, dns_message_t *msg, dns_name_t **namep) {
+parse_name(char **cmdlinep, dns_message_t *msg, dns_linkedname_t **namep) {
 	isc_result_t result;
 	char *word;
 	isc_buffer_t source;
@@ -1282,7 +1295,7 @@ parse_name(char **cmdlinep, dns_message_t *msg, dns_name_t **namep) {
 	dns_message_gettempname(msg, namep);
 	isc_buffer_init(&source, word, strlen(word));
 	isc_buffer_add(&source, strlen(word));
-	result = dns_name_fromtext(*namep, &source, dns_rootname, 0);
+	result = dns_name_fromtext(dns_name(*namep), &source, dns_rootname, 0);
 	if (result != ISC_R_SUCCESS) {
 		error("invalid owner name: %s", isc_result_totext(result));
 		isc_buffer_invalidate(&source);
@@ -1349,7 +1362,7 @@ static uint16_t
 make_prereq(char *cmdline, bool ispositive, bool isrrset) {
 	isc_result_t result;
 	char *word;
-	dns_name_t *name = NULL;
+	dns_linkedname_t *name = NULL;
 	isc_textregion_t region;
 	dns_rdataset_t *rdataset = NULL;
 	dns_rdatalist_t *rdatalist = NULL;
@@ -1863,7 +1876,7 @@ evaluate_class(char *cmdline) {
 static uint16_t
 update_addordelete(char *cmdline, bool isdelete) {
 	isc_result_t result;
-	dns_name_t *name = NULL;
+	dns_linkedname_t *linkedname = NULL;
 	uint32_t ttl;
 	char *word;
 	dns_rdataclass_t rdataclass;
@@ -1879,10 +1892,11 @@ update_addordelete(char *cmdline, bool isdelete) {
 	/*
 	 * Read the owner name.
 	 */
-	retval = parse_name(&cmdline, updatemsg, &name);
+	retval = parse_name(&cmdline, updatemsg, &linkedname);
 	if (retval != STATUS_MORE) {
 		return retval;
 	}
+	const dns_name_t *name = dns_name(linkedname);
 
 	dns_message_gettemprdata(updatemsg, &rdata);
 
@@ -2042,7 +2056,7 @@ parseclass:
 	if (!isdelete && rdata->type == dns_rdatatype_nsec3param) {
 		dns_rdata_nsec3param_t nsec3param;
 
-		result = dns_rdata_tostruct(rdata, &nsec3param, NULL);
+		result = dns_rdata_tostruct(rdata, &nsec3param);
 		check_result(result, "dns_rdata_tostruct");
 		if (nsec3param.iterations > dns_nsec3_maxiterations()) {
 			fprintf(stderr,
@@ -2062,14 +2076,14 @@ doneparsing:
 	rdatalist->ttl = (dns_ttl_t)ttl;
 	ISC_LIST_APPEND(rdatalist->rdata, rdata, link);
 	dns_rdatalist_tordataset(rdatalist, rdataset);
-	ISC_LIST_INIT(name->list);
-	ISC_LIST_APPEND(name->list, rdataset, link);
-	dns_message_addname(updatemsg, name, DNS_SECTION_UPDATE);
+	ISC_LIST_INIT(linkedname->list);
+	ISC_LIST_APPEND(linkedname->list, rdataset, link);
+	dns_message_addname(updatemsg, linkedname, DNS_SECTION_UPDATE);
 	return STATUS_MORE;
 
 failure:
-	if (name != NULL) {
-		dns_message_puttempname(updatemsg, &name);
+	if (linkedname != NULL) {
+		dns_message_puttempname(updatemsg, &linkedname);
 	}
 	dns_message_puttemprdata(updatemsg, &rdata);
 	return STATUS_SYNTAX;
@@ -2154,7 +2168,7 @@ evaluate_checksvcb(char *cmdline) {
 static void
 setzone(dns_name_t *zonename) {
 	dns_namelist_t *secs = updatemsg->sections;
-	dns_name_t *name = NULL;
+	dns_linkedname_t *name = NULL;
 
 	if (!ISC_LIST_EMPTY(secs[DNS_SECTION_ZONE])) {
 		INSIST(updatemsg->from_to_wire == DNS_MESSAGE_INTENTRENDER);
@@ -2174,7 +2188,7 @@ setzone(dns_name_t *zonename) {
 		dns_rdataset_t *rdataset = NULL;
 
 		dns_message_gettempname(updatemsg, &name);
-		dns_name_clone(zonename, name);
+		dns_name_clone(zonename, dns_name(name));
 		dns_message_gettemprdataset(updatemsg, &rdataset);
 		dns_rdataset_makequestion(rdataset, getzoneclass(),
 					  dns_rdatatype_soa);
@@ -2402,7 +2416,7 @@ do_next_command(char *cmdline) {
 static uint16_t
 get_next_command(void) {
 	uint16_t result = STATUS_QUIT;
-	char cmdlinebuf[MAXCMD];
+	char cmdlinebuf[MAXCMD] = { 0 };
 	char *cmdline = NULL, *ptr = NULL;
 
 	if (interactive) {
@@ -2464,7 +2478,7 @@ check_tsig_error(dns_rdataset_t *rdataset, isc_buffer_t *b) {
 	result = dns_rdataset_first(rdataset);
 	check_result(result, "dns_rdataset_first");
 	dns_rdataset_current(rdataset, &rdata);
-	result = dns_rdata_tostruct(&rdata, &tsig, NULL);
+	result = dns_rdata_tostruct(&rdata, &tsig);
 	check_result(result, "dns_rdata_tostruct");
 	if (tsig.error != 0) {
 		if (isc_buffer_remaininglength(b) < 1) {
@@ -2639,7 +2653,8 @@ send_update(dns_name_t *zone, isc_sockaddr_t *primary) {
 
 	/* Windows doesn't like the tsig name to be compressed. */
 	if (updatemsg->tsigname) {
-		updatemsg->tsigname->attributes.nocompress = true;
+		dns_linkedname_name(updatemsg->tsigname)->attributes.nocompress =
+			true;
 	}
 
 	result = dns_request_create(requestmgr, updatemsg, srcaddr, primary,
@@ -2678,7 +2693,7 @@ recvsoa(void *arg) {
 	dns_message_t *soaquery = reqinfo->msg;
 	dns_message_t *rcvmsg = NULL;
 	dns_section_t section;
-	dns_name_t *name = NULL;
+	dns_linkedname_t *name = NULL;
 	dns_rdataset_t *soaset = NULL;
 	dns_rdata_soa_t soa;
 	dns_rdata_t soarr = DNS_RDATA_INIT;
@@ -2854,7 +2869,7 @@ lookforsoa:
 
 	dns_rdata_init(&soarr);
 	dns_rdataset_current(soaset, &soarr);
-	result = dns_rdata_tostruct(&soarr, &soa, NULL);
+	result = dns_rdata_tostruct(&soarr, &soa);
 	check_result(result, "dns_rdata_tostruct");
 
 	dns_name_init(&primary);
@@ -2897,7 +2912,6 @@ lookforsoa:
 					      primary_servers, primary_alloc);
 		if (primary_total == 0) {
 			seenerror = true;
-			dns_rdata_freestruct(&soa);
 			dns_message_detach(&soaquery);
 			dns_request_destroy(&request);
 			dns_message_detach(&rcvmsg);
@@ -2909,7 +2923,6 @@ lookforsoa:
 	} else {
 		primary_from_servers();
 	}
-	dns_rdata_freestruct(&soa);
 
 #if HAVE_GSSAPI
 	if (usegsstsig) {
@@ -2943,8 +2956,8 @@ droplabel:
 		fatal("could not find enclosing zone");
 	}
 	dns_name_init(&tname);
-	dns_name_getlabelsequence(name, 1, nlabels - 1, &tname);
-	dns_name_clone(&tname, name);
+	dns_name_getlabelsequence(dns_name(name), 1, nlabels - 1, &tname);
+	dns_name_clone(&tname, dns_name(name));
 	dns_request_destroy(&request);
 	dns_message_renderreset(soaquery);
 	dns_message_settsigkey(soaquery, NULL);
@@ -3330,7 +3343,7 @@ recvgss(void *arg) {
 static void
 start_update(void) {
 	dns_rdataset_t *rdataset = NULL;
-	dns_name_t *name = NULL;
+	dns_linkedname_t *name = NULL;
 	dns_request_t *request = NULL;
 	dns_message_t *soaquery = NULL;
 
@@ -3368,7 +3381,7 @@ start_update(void) {
 	dns_rdataset_makequestion(rdataset, getzoneclass(), dns_rdatatype_soa);
 
 	if (userzone != NULL) {
-		dns_name_clone(userzone, name);
+		dns_name_clone(userzone, dns_name(name));
 	} else {
 		dns_rdataset_t *tmprdataset;
 
@@ -3390,9 +3403,9 @@ start_update(void) {
 			return;
 		}
 
-		dns_name_t *firstname =
+		dns_linkedname_t *firstname =
 			ISC_LIST_HEAD(updatemsg->sections[section]);
-		dns_name_clone(firstname, name);
+		dns_name_clone(firstname, dns_name(name));
 
 		/*
 		 * Looks to see if the first name references a DS record
@@ -3402,11 +3415,12 @@ start_update(void) {
 		 */
 		tmprdataset = ISC_LIST_HEAD(firstname->list);
 		if (section == DNS_SECTION_UPDATE &&
-		    !dns_name_equal(firstname, dns_rootname) &&
+		    !dns_name_isroot(dns_linkedname_name(firstname)) &&
 		    tmprdataset->type == dns_rdatatype_ds)
 		{
 			unsigned int labels = dns_name_countlabels(name);
-			dns_name_getlabelsequence(name, 1, labels - 1, name);
+			dns_name_getlabelsequence(dns_name(name), 1, labels - 1,
+						  dns_name(name));
 		}
 	}
 

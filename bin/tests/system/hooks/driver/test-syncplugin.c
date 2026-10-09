@@ -36,8 +36,9 @@ syncplugin__hook(void *arg, void *cbdata, isc_result_t *resp) {
 	UNUSED(resp);
 
 	if (inst->firstlbl != NULL) {
-		const dns_name_t *qname = qctx->client->query.qname;
+		const dns_name_t *qname = dns_name(qctx->client->query.qname);
 		dns_label_t label;
+		size_t len = strlen(inst->firstlbl);
 
 		dns_name_getlabel(qname, 0, &label);
 
@@ -45,8 +46,8 @@ syncplugin__hook(void *arg, void *cbdata, isc_result_t *resp) {
 		 * +1 because the first label byte is the length of the label
 		 * itself
 		 */
-		if (strncmp(inst->firstlbl, (char *)label.base + 1,
-			    strlen(inst->firstlbl)) == 0)
+		if (*label.base == len &&
+		    strncmp(inst->firstlbl, (char *)label.base + 1, len) == 0)
 		{
 			return NS_HOOK_CONTINUE;
 		}
@@ -153,12 +154,12 @@ plugin_register(const char *parameters, const void *cfg, const char *cfgfile,
 			goto cleanup;
 		}
 
-		result = dns_name_fromstring(&example2com, "example2.com.",
-					     NULL, 0, isc_g_mctx);
-		result = dns_name_fromstring(&example3com, "example3.com.",
-					     NULL, 0, isc_g_mctx);
-		result = dns_name_fromstring(&example4com, "example4.com.",
-					     NULL, 0, isc_g_mctx);
+		CHECK(dns_name_fromstring(&example2com, "example2.com.", NULL,
+					  0, isc_g_mctx));
+		CHECK(dns_name_fromstring(&example3com, "example3.com.", NULL,
+					  0, isc_g_mctx));
+		CHECK(dns_name_fromstring(&example4com, "example4.com.", NULL,
+					  0, isc_g_mctx));
 
 		if (!dns_name_equal(ctx->origin, &example2com) &&
 		    !dns_name_equal(ctx->origin, &example3com) &&

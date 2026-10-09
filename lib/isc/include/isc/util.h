@@ -39,6 +39,10 @@
 #define __has_header(x) 0
 #endif
 
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+
 /***
  *** General Macros.
  ***/
@@ -215,12 +219,12 @@ mock_assert(const int result, const char *const expression,
 #define FATAL_ERROR(...) \
 	isc_error_fatal(__FILE__, __LINE__, __func__, __VA_ARGS__)
 
-#define REPORT_SYSERROR(report, err, fmt, ...)                        \
-	{                                                             \
-		char strerr[ISC_STRERRORSIZE];                        \
-		strerror_r(err, strerr, sizeof(strerr));              \
-		report(__FILE__, __LINE__, __func__, fmt ": %s (%d)", \
-		       ##__VA_ARGS__, strerr, err);                   \
+#define REPORT_SYSERROR(report, err, fmt, ...)                       \
+	{                                                            \
+		char strerr[ISC_STRERRORSIZE];                       \
+		strerror_r(err, strerr, sizeof(strerr));             \
+		report(__FILE__, __LINE__, __func__,                 \
+		       fmt ": %s (%d)", ##__VA_ARGS__, strerr, err); \
 	}
 
 #define UNEXPECTED_SYSERROR(err, ...) \
@@ -303,3 +307,21 @@ mock_assert(const int result, const char *const expression,
 		a = b;                    \
 		b = __tmp_swap;           \
 	}
+
+#if __has_builtin(__builtin_types_compatible_p)
+#define ISC_TYPES_COMPATIBLE(x, y) __builtin_types_compatible_p(x, y)
+#else /* __has_builtin(__builtin_types_compatible_p) */
+#define ISC_TYPES_COMPATIBLE(x, y) 1
+#endif /* __has_builtin(__builtin_types_compatible_p) */
+
+/* clang-format off */
+/*
+ * This needs some extra plumbing for non-C23 compilers, see
+ * lib/dns/include/dns/ede.h:dns_edecode_t for example.
+ */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define ISC_FIXED_ENUM(name, type) name: type
+#else
+#define ISC_FIXED_ENUM(name, type) __attribute__((__packed__)) name
+#endif
+/* clang-format on */

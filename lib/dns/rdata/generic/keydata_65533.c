@@ -40,19 +40,19 @@ fromtext_keydata(ARGS_FROMTEXT) {
 	/* refresh timer */
 	RETERR(isc_lex_getmastertoken(lexer, &token, isc_tokentype_string,
 				      false));
-	RETTOK(dns_time32_fromtext(DNS_AS_STR(token), &refresh));
+	RETTOK(dns_time32_fromregion(token.value.as_textregion, &refresh));
 	RETERR(uint32_tobuffer(refresh, target));
 
 	/* add hold-down */
 	RETERR(isc_lex_getmastertoken(lexer, &token, isc_tokentype_string,
 				      false));
-	RETTOK(dns_time32_fromtext(DNS_AS_STR(token), &addhd));
+	RETTOK(dns_time32_fromregion(token.value.as_textregion, &addhd));
 	RETERR(uint32_tobuffer(addhd, target));
 
 	/* remove hold-down */
 	RETERR(isc_lex_getmastertoken(lexer, &token, isc_tokentype_string,
 				      false));
-	RETTOK(dns_time32_fromtext(DNS_AS_STR(token), &removehd));
+	RETTOK(dns_time32_fromregion(token.value.as_textregion, &removehd));
 	RETERR(uint32_tobuffer(removehd, target));
 
 	/* flags */
@@ -384,26 +384,8 @@ tostruct_keydata(ARGS_TOSTRUCT) {
 
 	/* Data */
 	keydata->datalen = sr.length;
-	keydata->data = mem_maybedup(mctx, sr.base, keydata->datalen);
-	keydata->mctx = mctx;
+	keydata->data = sr.base;
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_keydata(ARGS_FREESTRUCT) {
-	dns_rdata_keydata_t *keydata = (dns_rdata_keydata_t *)source;
-
-	REQUIRE(keydata != NULL);
-	REQUIRE(keydata->common.rdtype == dns_rdatatype_keydata);
-
-	if (keydata->mctx == NULL) {
-		return;
-	}
-
-	if (keydata->data != NULL) {
-		isc_mem_free(keydata->mctx, keydata->data);
-	}
-	keydata->mctx = NULL;
 }
 
 static isc_result_t

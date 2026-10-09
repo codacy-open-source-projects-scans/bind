@@ -1,4 +1,3 @@
-############################################################################
 # Copyright (C) Internet Systems Consortium, Inc. ("ISC")
 #
 # SPDX-License-Identifier: MPL-2.0
@@ -9,7 +8,6 @@
 #
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
-############################################################################
 
 import json
 import os
@@ -178,6 +176,13 @@ man_pages = [
         "named-rrchecker",
         "named-rrchecker",
         "syntax checker for individual DNS resource records",
+        author,
+        1,
+    ),
+    (
+        "named-wireformat",
+        "named-wireformat",
+        "parse DNS wire format messages",
         author,
         1,
     ),

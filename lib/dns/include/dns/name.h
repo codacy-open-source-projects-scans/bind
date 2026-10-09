@@ -65,10 +65,12 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 
 #include <isc/attributes.h>
 #include <isc/buffer.h>
+#include <isc/hash.h>
 #include <isc/hashmap.h>
 #include <isc/magic.h>
 #include <isc/region.h> /* Required for storage size of dns_label_t. */
@@ -111,12 +113,42 @@ struct dns_name {
 		bool update	  : 1; /*%< Used by client. */
 		bool hasupdaterec : 1; /*%< Used by client. */
 	} attributes;
-	unsigned char *ndata;
+	unsigned char *ndata ISC_ATTR_COUNTED_BY_PTR(length);
 	isc_buffer_t  *buffer;
-	ISC_LINK(dns_name_t) link;
+};
+
+struct dns_linkedname {
+	dns_name_t name;
+	ISC_LINK(dns_linkedname_t) link;
 	ISC_LIST(dns_rdataset_t) list;
 	isc_hashmap_t *hashmap;
 };
+
+static inline dns_name_t *
+dns_linkedname_name(dns_linkedname_t *nwl) {
+	return nwl != NULL ? &nwl->name : NULL;
+}
+
+static inline struct dns_name_attrs *
+dns_linkedname_attrs(dns_linkedname_t *nwl) {
+	return nwl != NULL ? &nwl->name.attributes : NULL;
+}
+
+static inline const dns_name_t *
+dns_linkedname_name_const(const dns_linkedname_t *nwl) {
+	return nwl != NULL ? &nwl->name : NULL;
+}
+
+dns_name_t *
+dns_fixedname_name(dns_fixedname_t *fixed);
+
+const dns_name_t *
+dns_fixedname_name_const(const dns_fixedname_t *fixed);
+
+static inline const dns_name_t *
+dns_name__readonly_arg(const dns_name_t *name) {
+	return name;
+}
 
 #define DNS_NAME_MAGIC	  ISC_MAGIC('D', 'N', 'S', 'n')
 #define DNS_NAME_VALID(n) ISC_MAGIC_VALID(n, DNS_NAME_MAGIC)
@@ -165,8 +197,6 @@ extern const dns_name_t *dns_inaddrarpa;
 		.ndata = (__ndata),                 \
 		.length = (sizeof(__ndata) - 1),    \
 		.attributes = { .readonly = true }, \
-		.link = ISC_LINK_INITIALIZER,       \
-		.list = ISC_LIST_INITIALIZER,       \
 	}
 
 #define DNS_NAME_INITABSOLUTE(__ndata)                                \
@@ -175,14 +205,39 @@ extern const dns_name_t *dns_inaddrarpa;
 		.ndata = (__ndata),                                   \
 		.length = sizeof(__ndata),                            \
 		.attributes = { .readonly = true, .absolute = true }, \
-		.link = ISC_LINK_INITIALIZER,                         \
-		.list = ISC_LIST_INITIALIZER,                         \
 	}
 
-#define DNS_NAME_INITEMPTY              \
-	{ .magic = DNS_NAME_MAGIC,      \
-	  .link = ISC_LINK_INITIALIZER, \
-	  .list = ISC_LIST_INITIALIZER }
+#define DNS_NAME_INITEMPTY { .magic = DNS_NAME_MAGIC }
+
+/*%<
+ * These are similar macros for initializing dns_linkedname structures.
+ */
+#define DNS_LINKEDNAME_INITNONABSOLUTE(__ndata)          \
+	{                                                \
+		.name.magic = DNS_NAME_MAGIC,            \
+		.name.ndata = (__ndata),                 \
+		.name.length = (sizeof(__ndata) - 1),    \
+		.name.attributes = { .readonly = true }, \
+		.link = ISC_LINK_INITIALIZER,            \
+		.list = ISC_LIST_INITIALIZER,            \
+	}
+
+#define DNS_LINKEDNAME_INITABSOLUTE(__ndata)                               \
+	{                                                                  \
+		.name.magic = DNS_NAME_MAGIC,                              \
+		.name.ndata = (__ndata),                                   \
+		.name.length = sizeof(__ndata),                            \
+		.name.attributes = { .readonly = true, .absolute = true }, \
+		.link = ISC_LINK_INITIALIZER,                              \
+		.list = ISC_LIST_INITIALIZER,                              \
+	}
+
+#define DNS_LINKEDNAME_INITEMPTY              \
+	{                                     \
+		.name.magic = DNS_NAME_MAGIC, \
+		.link = ISC_LINK_INITIALIZER, \
+		.list = ISC_LIST_INITIALIZER, \
+	}
 
 /*%
  * Standard sizes of a wire format name
@@ -209,8 +264,6 @@ static inline void
 dns_name_init(dns_name_t *name) {
 	*name = (dns_name_t){
 		.magic = DNS_NAME_MAGIC,
-		.link = ISC_LINK_INITIALIZER,
-		.list = ISC_LIST_INITIALIZER,
 	};
 }
 /*%<
@@ -269,7 +322,6 @@ dns_name_invalidate(dns_name_t *name) {
 	name->length = 0;
 	name->attributes = (struct dns_name_attrs){};
 	name->buffer = NULL;
-	ISC_LINK_INIT(name, link);
 }
 /*%<
  * Make 'name' invalid.
@@ -288,6 +340,28 @@ bool
 dns_name_isvalid(const dns_name_t *name);
 /*%<
  * Check whether 'name' points to a valid dns_name
+ */
+
+static inline void
+dns_linkedname_init(dns_linkedname_t *name) {
+	dns_name_init(&name->name);
+	ISC_LINK_INIT(name, link);
+	ISC_LIST_INIT(name->list);
+	name->hashmap = NULL;
+}
+/*%<
+ * Initialize 'name' as a dns_linkedname_t.
+ */
+
+static inline void
+dns_linkedname_invalidate(dns_linkedname_t *name) {
+	dns_name_invalidate(&name->name);
+	ISC_LINK_INIT(name, link);
+	ISC_LIST_INIT(name->list);
+	name->hashmap = NULL;
+}
+/*%<
+ * Make dns_linkedname_t 'name' invalid.
  */
 
 /***
@@ -343,7 +417,7 @@ dns_name_hasbuffer(const dns_name_t *name);
  ***/
 
 bool
-dns_name_isabsolute(const dns_name_t *name);
+dns_name__isabsolute(const dns_name_t *name);
 /*%<
  * Does 'name' end in the root label?
  *
@@ -356,7 +430,7 @@ dns_name_isabsolute(const dns_name_t *name);
  */
 
 bool
-dns_name_iswildcard(const dns_name_t *name);
+dns_name__iswildcard(const dns_name_t *name);
 /*%<
  * Is 'name' a wildcard name?
  *
@@ -371,7 +445,7 @@ dns_name_iswildcard(const dns_name_t *name);
  */
 
 uint32_t
-dns_name_hash(const dns_name_t *name);
+dns_name__hash(const dns_name_t *name);
 /*%<
  * Provide a hash value for 'name'.
  *
@@ -386,13 +460,25 @@ dns_name_hash(const dns_name_t *name);
  *\li	A hash value
  */
 
+void
+dns_name_hash_ex(isc_hash32_t *hash, const dns_name_t *name);
+/*%<
+ * Add the hash of 'name' into the hash for incremental hashing.
+ *
+ * See dns_name_hash() for details.
+ *
+ * Requires:
+ *\li\t'hash' is a valid hash state
+ *\li\t'name' is a valid name
+ */
+
 /*
  *** Comparisons
  ***/
 
 dns_namereln_t
-dns_name_fullcompare(const dns_name_t *name1, const dns_name_t *name2,
-		     int *orderp, unsigned int *nlabelsp);
+dns_name__fullcompare(const dns_name_t *name1, const dns_name_t *name2,
+		      int *orderp, unsigned int *nlabelsp);
 /*%<
  * Determine the relative ordering under the DNSSEC order relation of
  * 'name1' and 'name2', and also determine the hierarchical
@@ -435,7 +521,7 @@ dns_name_fullcompare(const dns_name_t *name1, const dns_name_t *name2,
  */
 
 int
-dns_name_compare(const dns_name_t *name1, const dns_name_t *name2);
+dns_name__compare(const dns_name_t *name1, const dns_name_t *name2);
 /*%<
  * Determine the relative ordering under the DNSSEC order relation of
  * 'name1' and 'name2'.
@@ -459,7 +545,7 @@ dns_name_compare(const dns_name_t *name1, const dns_name_t *name2);
  */
 
 bool
-dns_name_equal(const dns_name_t *name1, const dns_name_t *name2);
+dns_name__equal(const dns_name_t *name1, const dns_name_t *name2);
 /*%<
  * Are 'name1' and 'name2' equal?
  *
@@ -512,7 +598,7 @@ dns_name_rdatacompare(const dns_name_t *name1, const dns_name_t *name2);
  */
 
 bool
-dns_name_issubdomain(const dns_name_t *name1, const dns_name_t *name2);
+dns_name__issubdomain(const dns_name_t *name1, const dns_name_t *name2);
 /*%<
  * Is 'name1' a subdomain of 'name2'?
  *
@@ -591,8 +677,22 @@ dns_name_offsets(const dns_name_t *name, dns_offsets_t offsets);
  *	individual labels in the name
  */
 
+static inline bool
+dns_name_empty(const dns_name_t *name) {
+	REQUIRE(DNS_NAME_VALID(name));
+
+	return name->length == 0;
+}
+/*%<
+ * Return whether the name is empty.
+ *
+ * Requires:
+ * \li	'name' is a valid name
+ *
+ */
+
 static inline uint8_t
-dns_name_countlabels(const dns_name_t *name) {
+dns_name__countlabels(const dns_name_t *name) {
 	REQUIRE(DNS_NAME_VALID(name));
 
 	return dns_name_offsets(name, NULL);
@@ -656,7 +756,7 @@ dns_name_getlabelsequence(const dns_name_t *source, unsigned int first,
  */
 
 void
-dns_name_clone(const dns_name_t *source, dns_name_t *target);
+dns_name__clone(const dns_name_t *source, dns_name_t *target);
 /*%<
  * Make 'target' refer to the same name as 'source'.
  *
@@ -702,7 +802,7 @@ dns_name_fromregion(dns_name_t *name, const isc_region_t *r);
  */
 
 static inline void
-dns_name_toregion(const dns_name_t *name, isc_region_t *r) {
+dns_name__toregion(const dns_name_t *name, isc_region_t *r) {
 	REQUIRE(DNS_NAME_VALID(name));
 	REQUIRE(r != NULL);
 
@@ -720,8 +820,8 @@ dns_name_toregion(const dns_name_t *name, isc_region_t *r) {
  */
 
 isc_result_t
-dns_name_fromwire(dns_name_t *name, isc_buffer_t *source, dns_decompress_t dctx,
-		  isc_buffer_t *target);
+dns_name_fromwire(dns_name_t *name, isc_buffer_t *source,
+		  const dns_decompress_t dctx, isc_buffer_t *target);
 /*%<
  * Copy the possibly-compressed name at source (active region) into target,
  * decompressing it.
@@ -882,10 +982,11 @@ dns_name_wirefromtext(isc_buffer_t *source, const dns_name_t *origin,
 
 #define DNS_NAME_OMITFINALDOT 0x01U
 #define DNS_NAME_PRINCIPAL    0x02U /* do not escape $ and @ */
+#define DNS_NAME_QUOTED	      0x04U /* minimal escaping within double quotes */
 
 isc_result_t
-dns_name_totext(const dns_name_t *name, unsigned int options,
-		isc_buffer_t *target);
+dns_name__totext(const dns_name_t *name, unsigned int options,
+		 isc_buffer_t *target);
 /*%<
  * Convert 'name' into text format, storing the result in 'target'.
  *
@@ -1030,7 +1131,7 @@ dns_name_split(const dns_name_t *name, unsigned int suffixlabels,
 	REQUIRE(suffix == NULL ||
 		(DNS_NAME_VALID(suffix) && DNS_NAME_BINDABLE(suffix)));
 
-	uint8_t labels = dns_name_countlabels(name);
+	uint8_t labels = dns_name__countlabels(name);
 	INSIST(suffixlabels <= labels);
 
 	if (prefix != NULL) {
@@ -1087,7 +1188,7 @@ dns_name_split(const dns_name_t *name, unsigned int suffixlabels,
  */
 
 void
-dns_name_dup(const dns_name_t *source, isc_mem_t *mctx, dns_name_t *target);
+dns_name__dup(const dns_name_t *source, isc_mem_t *mctx, dns_name_t *target);
 /*%<
  * Make 'target' a dynamically allocated copy of 'source'.
  *
@@ -1115,6 +1216,17 @@ dns_name_free(dns_name_t *name, isc_mem_t *mctx);
  *
  *\li	All dynamic resources used by 'name' are freed and the name is
  *	invalidated.
+ */
+
+static inline void
+dns_linkedname_free(dns_linkedname_t *nwl, isc_mem_t *mctx) {
+	REQUIRE(DNS_NAME_VALID(&nwl->name));
+	REQUIRE(nwl->name.attributes.dynamic);
+	isc_mem_put(mctx, nwl->name.ndata, nwl->name.length);
+	dns_linkedname_invalidate(nwl);
+}
+/*%<
+ * Free 'nwl' and make the dns_linkedname_t invalid.
  */
 
 isc_result_t
@@ -1145,7 +1257,7 @@ dns_name_digest(const dns_name_t *name, dns_digestfunc_t digest, void *arg);
  */
 
 bool
-dns_name_dynamic(const dns_name_t *name);
+dns_name__dynamic(const dns_name_t *name);
 /*%<
  * Returns whether there is dynamic memory associated with this name.
  *
@@ -1177,7 +1289,7 @@ dns_name_print(const dns_name_t *name, FILE *stream);
  */
 
 void
-dns_name_format(const dns_name_t *name, char *cp, unsigned int size);
+dns_name__format(const dns_name_t *name, char *cp, unsigned int size);
 /*%<
  * Format 'name' as text appropriate for use in log messages.
  *
@@ -1268,7 +1380,7 @@ dns_name_settotextfilter(dns_name_totextfilter_t *proc);
  */
 
 void
-dns_name_copy(const dns_name_t *source, dns_name_t *dest);
+dns_name__copy(const dns_name_t *source, dns_name_t *dest);
 /*%<
  * Copies the name in 'source' into 'dest'.  The name data is copied to
  * the dedicated buffer for 'dest'. (If copying to a name that doesn't
@@ -1283,7 +1395,7 @@ dns_name_copy(const dns_name_t *source, dns_name_t *dest);
 bool
 dns_name_ishostname(const dns_name_t *name, bool wildcard);
 /*%<
- * Return if 'name' is a valid hostname.  RFC 952 / RFC 1123.
+ * Return true if 'name' is a valid hostname.  RFC 952 / RFC 1123.
  * If 'wildcard' is true then allow the first label of name to
  * be a wildcard.
  * The root is also accepted.
@@ -1295,16 +1407,16 @@ dns_name_ishostname(const dns_name_t *name, bool wildcard);
 bool
 dns_name_ismailbox(const dns_name_t *name);
 /*%<
- * Return if 'name' is a valid mailbox.  RFC 821.
+ * Return true if 'name' is a valid mailbox.  RFC 821.
  *
  * Requires:
  * \li	'name' to be valid.
  */
 
 bool
-dns_name_internalwildcard(const dns_name_t *name);
+dns_name__internalwildcard(const dns_name_t *name);
 /*%<
- * Return if 'name' contains a internal wildcard name.
+ * Return true if 'name' contains a internal wildcard name.
  *
  * Requires:
  * \li	'name' to be valid.
@@ -1329,7 +1441,7 @@ dns_name_isula(const dns_name_t *owner);
  */
 
 bool
-dns_name_istat(const dns_name_t *name);
+dns_name__istat(const dns_name_t *name);
 /*%<
  * Determine if 'name' is a potential 'trust-anchor-telemetry' name.
  */
@@ -1342,14 +1454,14 @@ dns_name_isdnssvcb(const dns_name_t *name);
  */
 
 size_t
-dns_name_size(const dns_name_t *name);
+dns_name__size(const dns_name_t *name);
 /*%<
  * Return the amount of dynamically allocated memory associated with
  * 'name' (which is 0 if 'name' is not dynamic).
  */
 
 bool
-dns_name_israd(const dns_name_t *name, const dns_name_t *rad);
+dns_name__israd(const dns_name_t *name, const dns_name_t *rad);
 /*%<
  * Determine whether 'name' matches the prescribed format of a
  * DNS error-reporting name:
@@ -1363,3 +1475,92 @@ dns_name_israd(const dns_name_t *name, const dns_name_t *rad);
  * Requires:
  * \li	'name' to be valid.
  */
+
+static inline bool
+dns_name_isroot(const dns_name_t *name) {
+	REQUIRE(DNS_NAME_VALID(name));
+
+	return name->length == 1 && name->ndata[0] == 0;
+}
+/*%<
+ * Return whether 'name' is the root name.
+ *
+ * Requires:
+ * \li	'name' to be valid.
+ */
+
+static inline bool
+dns_name_belowroot(const dns_name_t *name) {
+	REQUIRE(DNS_NAME_VALID(name));
+
+	return name->length != 0 && name->ndata[0] != 0;
+}
+/*%<
+ * Return whether 'name' is below root.  It checks whether there's at least one
+ * non-root label.
+ *
+ * Requires:
+ * \li	'name' to be valid.
+ */
+
+#define DNS_NAME__RO_ARG(arg)                                        \
+	_Generic((arg),                                              \
+		dns_name_t *: dns_name__readonly_arg,                \
+		const dns_name_t *: dns_name__readonly_arg,          \
+		dns_linkedname_t *: dns_linkedname_name,             \
+		const dns_linkedname_t *: dns_linkedname_name_const, \
+		dns_fixedname_t *: dns_fixedname_name,               \
+		const dns_fixedname_t *: dns_fixedname_name_const)(arg)
+
+#define dns_name(source)       DNS_NAME__RO_ARG(source)
+#define dns_name_const(source) DNS_NAME__RO_ARG(source)
+
+#define dns_name_clone(source, target) \
+	dns_name__clone(DNS_NAME__RO_ARG(source), target)
+
+#define dns_name_dup(source, mctx, target) \
+	dns_name__dup(DNS_NAME__RO_ARG(source), mctx, target)
+
+#define dns_name_copy(source, dest) \
+	dns_name__copy(DNS_NAME__RO_ARG(source), dest)
+
+#define dns_name_isabsolute(name) dns_name__isabsolute(DNS_NAME__RO_ARG(name))
+
+#define dns_name_iswildcard(name) dns_name__iswildcard(DNS_NAME__RO_ARG(name))
+
+#define dns_name_hash(name) dns_name__hash(DNS_NAME__RO_ARG(name))
+
+#define dns_name_fullcompare(name1, name2, orderp, nlabelsp) \
+	dns_name__fullcompare(DNS_NAME__RO_ARG(name1),       \
+			      DNS_NAME__RO_ARG(name2), orderp, nlabelsp)
+
+#define dns_name_compare(name1, name2) \
+	dns_name__compare(DNS_NAME__RO_ARG(name1), DNS_NAME__RO_ARG(name2))
+
+#define dns_name_equal(name1, name2) \
+	dns_name__equal(DNS_NAME__RO_ARG(name1), DNS_NAME__RO_ARG(name2))
+
+#define dns_name_issubdomain(name1, name2) \
+	dns_name__issubdomain(DNS_NAME__RO_ARG(name1), DNS_NAME__RO_ARG(name2))
+
+#define dns_name_countlabels(name) dns_name__countlabels(DNS_NAME__RO_ARG(name))
+
+#define dns_name_toregion(name, r) dns_name__toregion(DNS_NAME__RO_ARG(name), r)
+
+#define dns_name_totext(name, options, target) \
+	dns_name__totext(DNS_NAME__RO_ARG(name), options, target)
+
+#define dns_name_dynamic(name) dns_name__dynamic(DNS_NAME__RO_ARG(name))
+
+#define dns_name_format(name, cp, size) \
+	dns_name__format(DNS_NAME__RO_ARG(name), cp, size)
+
+#define dns_name_internalwildcard(name) \
+	dns_name__internalwildcard(DNS_NAME__RO_ARG(name))
+
+#define dns_name_istat(name) dns_name__istat(DNS_NAME__RO_ARG(name))
+
+#define dns_name_size(name) dns_name__size(DNS_NAME__RO_ARG(name))
+
+#define dns_name_israd(name, rad) \
+	dns_name__israd(DNS_NAME__RO_ARG(name), DNS_NAME__RO_ARG(rad))

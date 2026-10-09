@@ -440,19 +440,18 @@ start_fetch(resctx_t *rctx) {
 	}
 
 	result = dns_resolver_createfetch(
-		rctx->view->resolver, dns_fixedname_name(&rctx->name),
-		rctx->type, NULL, NULL, NULL, NULL, 0, fopts, 0, NULL, rctx->qc,
-		NULL, rctx->client->loop, fetch_done, rctx, NULL,
-		rctx->rdataset, rctx->sigrdataset, &rctx->fetch);
+		rctx->view->resolver, dns_name(&rctx->name), rctx->type, NULL,
+		NULL, NULL, NULL, 0, fopts, 0, NULL, rctx->qc, NULL,
+		rctx->client->loop, fetch_done, rctx, NULL, rctx->rdataset,
+		rctx->sigrdataset, &rctx->fetch);
 
 	return result;
 }
 
 static isc_result_t
-view_find(resctx_t *rctx, dns_db_t **dbp, dns_dbnode_t **nodep,
-	  dns_name_t *foundname) {
+view_find(resctx_t *rctx, dns_db_t **dbp, dns_name_t *foundname) {
 	isc_result_t result;
-	dns_name_t *name = dns_fixedname_name(&rctx->name);
+	dns_name_t *name = dns_name(&rctx->name);
 	dns_rdatatype_t type;
 
 	if (rctx->type == dns_rdatatype_rrsig) {
@@ -461,9 +460,8 @@ view_find(resctx_t *rctx, dns_db_t **dbp, dns_dbnode_t **nodep,
 		type = rctx->type;
 	}
 
-	result = dns_view_find(rctx->view, name, type, 0, 0, false, false, dbp,
-			       nodep, foundname, rctx->rdataset,
-			       rctx->sigrdataset);
+	result = dns_view_find(rctx->view, name, type, 0, 0, false, dbp,
+			       foundname, rctx->rdataset, rctx->sigrdataset);
 
 	return result;
 }
@@ -489,11 +487,11 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 
 	mctx = rctx->view->mctx;
 
-	name = dns_fixedname_name(&rctx->name);
+	name = dns_name(&rctx->name);
 
 	do {
 		dns_name_t *fname = dns_fixedname_initname(&foundname);
-		dns_name_t *ansname = NULL;
+		dns_linkedname_t *ansname = NULL;
 		dns_db_t *db = NULL;
 		dns_dbnode_t *node = NULL;
 
@@ -504,16 +502,12 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 			INSIST(!dns_rdataset_isassociated(rctx->rdataset));
 			INSIST(rctx->sigrdataset == NULL ||
 			       !dns_rdataset_isassociated(rctx->sigrdataset));
-			result = view_find(rctx, &db, &node, fname);
+			result = view_find(rctx, &db, fname);
 			if (result == ISC_R_NOTFOUND) {
 				/*
 				 * We don't know anything about the name.
 				 * Launch a fetch.
 				 */
-				if (node != NULL) {
-					INSIST(db != NULL);
-					dns_db_detachnode(&node);
-				}
 				if (db != NULL) {
 					dns_db_detach(&db);
 				}
@@ -545,12 +539,12 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 		 * Get some resource for copying the
 		 * result.
 		 */
-		dns_name_t *aname = dns_fixedname_name(&rctx->name);
+		dns_name_t *aname = dns_name(&rctx->name);
 
 		ansname = isc_mem_get(mctx, sizeof(*ansname));
-		dns_name_init(ansname);
+		dns_linkedname_init(ansname);
 
-		dns_name_dup(aname, mctx, ansname);
+		dns_name_dup(aname, mctx, dns_name(ansname));
 
 		switch (result) {
 		case ISC_R_SUCCESS:
@@ -583,13 +577,12 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 				goto done;
 			}
 			dns_rdataset_current(trdataset, &rdata);
-			tresult = dns_rdata_tostruct(&rdata, &cname, NULL);
+			tresult = dns_rdata_tostruct(&rdata, &cname);
 			dns_rdata_reset(&rdata);
 			if (tresult != ISC_R_SUCCESS) {
 				goto done;
 			}
 			dns_name_copy(&cname.cname, name);
-			dns_rdata_freestruct(&cname);
 			want_restart = true;
 			goto done;
 		case DNS_R_DNAME:
@@ -619,7 +612,7 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 				goto done;
 			}
 			dns_rdataset_current(trdataset, &rdata);
-			tresult = dns_rdata_tostruct(&rdata, &dname, NULL);
+			tresult = dns_rdata_tostruct(&rdata, &dname);
 			dns_rdata_reset(&rdata);
 			if (tresult != ISC_R_SUCCESS) {
 				result = tresult;
@@ -632,7 +625,6 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 			dns_name_split(name, nlabels, prefix, NULL);
 			tresult = dns_name_concatenate(prefix, &dname.dname,
 						       name);
-			dns_rdata_freestruct(&dname);
 			if (tresult == ISC_R_SUCCESS) {
 				want_restart = true;
 			} else {
@@ -666,6 +658,21 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 			int n = 0;
 			dns_rdatasetiter_t *rdsiter = NULL;
 
+			if (node == NULL) {
+				INSIST(db != NULL);
+				tresult = dns_db_findnode(db, fname, false,
+							  &node);
+				if (tresult != ISC_R_SUCCESS) {
+					result = tresult;
+					putrdataset(mctx, &rctx->rdataset);
+					if (rctx->sigrdataset != NULL) {
+						putrdataset(mctx,
+							    &rctx->sigrdataset);
+					}
+					goto done;
+				}
+			}
+
 			tresult = dns_db_allrdatasets(db, node, NULL, 0, 0,
 						      &rdsiter);
 			if (tresult != ISC_R_SUCCESS) {
@@ -677,7 +684,7 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 			while (tresult == ISC_R_SUCCESS) {
 				dns_rdatasetiter_current(rdsiter,
 							 rctx->rdataset);
-				if (rctx->rdataset->type != 0) {
+				if (!rctx->rdataset->attributes.negative) {
 					ISC_LIST_APPEND(ansname->list,
 							rctx->rdataset, link);
 					n++;
@@ -754,7 +761,7 @@ client_resfind(resctx_t *rctx, dns_fetchresponse_t *resp) {
 				ISC_LIST_UNLINK(ansname->list, rdataset, link);
 				putrdataset(mctx, &rdataset);
 			}
-			dns_name_free(ansname, mctx);
+			dns_name_free(dns_name(ansname), mctx);
 			isc_mem_put(mctx, ansname, sizeof(*ansname));
 		}
 
@@ -901,7 +908,7 @@ startresolve(dns_client_t *client, const dns_name_t *name,
 	rctx->sigrdataset = sigrdataset;
 
 	dns_fixedname_init(&rctx->name);
-	dns_name_copy(name, dns_fixedname_name(&rctx->name));
+	dns_name_copy(name, dns_name(&rctx->name));
 
 	dns_view_attach(client->view, &rctx->view);
 
@@ -980,7 +987,7 @@ dns_client_freeresanswer(dns_client_t *client, dns_namelist_t *namelist) {
 			putrdataset(client->mctx, &rdataset);
 		}
 
-		dns_name_free(name, client->mctx);
+		dns_name_free(dns_name(name), client->mctx);
 		isc_mem_put(client->mctx, name, sizeof(*name));
 	}
 }

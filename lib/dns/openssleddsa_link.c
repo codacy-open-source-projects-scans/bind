@@ -22,6 +22,7 @@
 
 #include <isc/crypto.h>
 #include <isc/mem.h>
+#include <isc/ossl_wrap.h>
 #include <isc/result.h>
 #include <isc/safe.h>
 #include <isc/string.h>
@@ -76,13 +77,13 @@ openssleddsa_alg_info(unsigned int key_alg) {
 
 static isc_result_t
 raw_key_to_ossl(const eddsa_alginfo_t *alginfo, int private,
-		const unsigned char *key, size_t *key_len, EVP_PKEY **pkey) {
+		const unsigned char *key, size_t key_len, EVP_PKEY **pkey) {
 	isc_result_t result;
 	int pkey_type = alginfo->pkey_type;
 	size_t len = alginfo->key_size;
 
 	result = (private ? DST_R_INVALIDPRIVATEKEY : DST_R_INVALIDPUBLICKEY);
-	if (*key_len < len) {
+	if (key_len != len) {
 		return result;
 	}
 
@@ -95,7 +96,6 @@ raw_key_to_ossl(const eddsa_alginfo_t *alginfo, int private,
 		return dst__openssl_toresult(result);
 	}
 
-	*key_len = len;
 	return ISC_R_SUCCESS;
 }
 
@@ -270,6 +270,27 @@ openssleddsa_generate(dst_key_t *key, int unused, void (*callback)(int)) {
 	UNUSED(unused);
 	UNUSED(callback);
 
+	if (key->label != NULL) {
+		switch (key->key_alg) {
+		case DST_ALG_ED25519:
+			RETERR(isc_ossl_wrap_generate_pkcs11_ed25519_key(
+				key->label, &pkey));
+			break;
+#if HAVE_OPENSSL_ED448
+		case DST_ALG_ED448:
+			RETERR(isc_ossl_wrap_generate_pkcs11_ed448_key(
+				key->label, &pkey));
+			break;
+#endif /* HAVE_OPENSSL_ED448 */
+		default:
+			UNREACHABLE();
+		}
+		key->key_size = alginfo->key_size * 8;
+		key->keydata.pkeypair.priv = pkey;
+		key->keydata.pkeypair.pub = pkey;
+		return ISC_R_SUCCESS;
+	}
+
 	ctx = EVP_PKEY_CTX_new_id(alginfo->nid, NULL);
 	if (ctx == NULL) {
 		return dst__openssl_toresult2("EVP_PKEY_CTX_new_id",
@@ -326,7 +347,6 @@ static isc_result_t
 openssleddsa_fromdns(dst_key_t *key, isc_buffer_t *data) {
 	const eddsa_alginfo_t *alginfo = openssleddsa_alg_info(key->key_alg);
 	isc_region_t r;
-	size_t len;
 	EVP_PKEY *pkey = NULL;
 
 	REQUIRE(alginfo != NULL);
@@ -336,12 +356,11 @@ openssleddsa_fromdns(dst_key_t *key, isc_buffer_t *data) {
 		return ISC_R_SUCCESS;
 	}
 
-	len = r.length;
-	RETERR(raw_key_to_ossl(alginfo, 0, r.base, &len, &pkey));
+	RETERR(raw_key_to_ossl(alginfo, 0, r.base, r.length, &pkey));
 
-	isc_buffer_forward(data, len);
+	isc_buffer_forward(data, alginfo->key_size);
 	key->keydata.pkeypair.pub = pkey;
-	key->key_size = len * 8;
+	key->key_size = alginfo->key_size * 8;
 	return ISC_R_SUCCESS;
 }
 
@@ -371,14 +390,22 @@ openssleddsa_tofile(const dst_key_t *key, const char *directory) {
 		len = alginfo->key_size;
 		buf = isc_mem_get(key->mctx, len);
 		if (EVP_PKEY_get_raw_private_key(key->keydata.pkeypair.priv,
-						 buf, &len) != 1)
+						 buf, &len) == 1)
 		{
-			CLEANUP(dst__openssl_toresult(ISC_R_FAILURE));
+			priv.elements[i].tag = TAG_EDDSA_PRIVATEKEY;
+			priv.elements[i].length = len;
+			priv.elements[i].data = buf;
+			i++;
+		} else if (key->label != NULL) {
+			/*
+			 * The raw private key is not extractable
+			 * (e.g. HSM-backed via PKCS#11); fall through to
+			 * writing only the label.
+			 */
+			ERR_clear_error();
+		} else {
+			CLEANUP(dst__openssl_toresult(DST_R_OPENSSLFAILURE));
 		}
-		priv.elements[i].tag = TAG_EDDSA_PRIVATEKEY;
-		priv.elements[i].length = len;
-		priv.elements[i].data = buf;
-		i++;
 	}
 	if (key->label != NULL) {
 		priv.elements[i].tag = TAG_EDDSA_LABEL;
@@ -393,7 +420,7 @@ openssleddsa_tofile(const dst_key_t *key, const char *directory) {
 
 cleanup:
 	if (buf != NULL) {
-		isc_mem_put(key->mctx, buf, len);
+		isc_mem_put(key->mctx, buf, alginfo->key_size);
 	}
 	return result;
 }
@@ -406,7 +433,6 @@ openssleddsa_parse(dst_key_t *key, isc_lex_t *lexer, dst_key_t *pub) {
 	int i, privkey_index = -1;
 	const char *label = NULL;
 	EVP_PKEY *pkey = NULL;
-	size_t len;
 	isc_mem_t *mctx = key->mctx;
 
 	REQUIRE(alginfo != NULL);
@@ -434,6 +460,9 @@ openssleddsa_parse(dst_key_t *key, isc_lex_t *lexer, dst_key_t *pub) {
 			/* The Engine: tag is explicitly ignored */
 			break;
 		case TAG_EDDSA_LABEL:
+			/* NUL terminated data? */
+			CHECK(dst__privelement_is_nul_terminated(
+				&priv.elements[i]));
 			label = (char *)priv.elements[i].data;
 			break;
 		case TAG_EDDSA_PRIVATEKEY:
@@ -459,9 +488,8 @@ openssleddsa_parse(dst_key_t *key, isc_lex_t *lexer, dst_key_t *pub) {
 		CLEANUP(DST_R_INVALIDPRIVATEKEY);
 	}
 
-	len = priv.elements[privkey_index].length;
 	CHECK(raw_key_to_ossl(alginfo, 1, priv.elements[privkey_index].data,
-			      &len, &pkey));
+			      priv.elements[privkey_index].length, &pkey));
 	/* Check that the public component matches if given */
 	if (pub != NULL && EVP_PKEY_eq(pkey, pub->keydata.pkeypair.pub) != 1) {
 		CLEANUP(DST_R_INVALIDPRIVATEKEY);
@@ -469,7 +497,7 @@ openssleddsa_parse(dst_key_t *key, isc_lex_t *lexer, dst_key_t *pub) {
 
 	key->keydata.pkeypair.priv = pkey;
 	key->keydata.pkeypair.pub = pkey;
-	key->key_size = len * 8;
+	key->key_size = alginfo->key_size * 8;
 	pkey = NULL;
 	result = ISC_R_SUCCESS;
 
@@ -587,7 +615,7 @@ check_algorithm(unsigned char algorithm) {
 	}
 
 	INSIST(alginfo != NULL);
-	CHECK(raw_key_to_ossl(alginfo, 0, key, &key_len, &pkey));
+	CHECK(raw_key_to_ossl(alginfo, 0, key, key_len, &pkey));
 
 	/*
 	 * Check that we can verify the signature.

@@ -85,6 +85,7 @@ purge_old_interfaces(ns_interfacemgr_t *mgr);
 static void
 clearlistenon(ns_interfacemgr_t *mgr);
 
+#if defined(RTM_NEWADDR) && defined(RTM_DELADDR)
 static bool
 need_rescan(ns_interfacemgr_t *mgr, struct MSGHDR *rtm, size_t len) {
 	if (rtm->MSGTYPE != RTM_NEWADDR && rtm->MSGTYPE != RTM_DELADDR) {
@@ -186,6 +187,7 @@ need_rescan(ns_interfacemgr_t *mgr, struct MSGHDR *rtm, size_t len) {
 
 	return false;
 }
+#endif /* if defined(RTM_NEWADDR) && defined(RTM_DELADDR) */
 
 static void
 route_recv(isc_nmhandle_t *handle, isc_result_t eresult, isc_region_t *region,
@@ -237,9 +239,11 @@ route_recv(isc_nmhandle_t *handle, isc_result_t eresult, isc_region_t *region,
 
 	REQUIRE(mgr->route != NULL);
 
+#if defined(RTM_NEWADDR) && defined(RTM_DELADDR)
 	if (need_rescan(mgr, rtm, rtmlen) && mgr->sctx->interface_auto) {
 		ns_interfacemgr_scan(mgr, false, false);
 	}
+#endif /* if defined(RTM_NEWADDR) && defined(RTM_DELADDR) */
 
 	isc_nm_read(handle, route_recv, mgr);
 	return;
@@ -476,12 +480,12 @@ ns_interface_listenudp(ns_interface_t *ifp, isc_nm_proxy_type_t proxy) {
 	if (proxy == ISC_NM_PROXY_NONE) {
 		result = isc_nm_listenudp(ISC_NM_LISTEN_ALL, &ifp->addr,
 					  ns_client_request, ifp,
-					  &ifp->udplistensocket);
+					  &ifp->udplistener);
 	} else {
 		INSIST(proxy == ISC_NM_PROXY_PLAIN);
 		result = isc_nm_listenproxyudp(ISC_NM_LISTEN_ALL, &ifp->addr,
 					       ns_client_request, ifp,
-					       &ifp->udplistensocket);
+					       &ifp->proxyudplistener);
 	}
 	return result;
 }
@@ -726,9 +730,13 @@ void
 ns_interface_shutdown(ns_interface_t *ifp) {
 	ifp->flags &= ~NS_INTERFACEFLAG_LISTENING;
 
-	if (ifp->udplistensocket != NULL) {
-		isc_nm_stoplistening(ifp->udplistensocket);
-		isc_nmsocket_close(&ifp->udplistensocket);
+	if (ifp->udplistener != NULL) {
+		isc_nm_udplistener_stop(ifp->udplistener);
+		isc_nm_udplistener_detach(&ifp->udplistener);
+	}
+	if (ifp->proxyudplistener != NULL) {
+		isc_nm_proxyudplistener_stop(ifp->proxyudplistener);
+		isc_nm_proxyudplistener_detach(&ifp->proxyudplistener);
 	}
 	if (ifp->tcplistensocket != NULL) {
 		isc_nm_stoplistening(ifp->tcplistensocket);
@@ -840,8 +848,8 @@ setup_locals(isc_interface_t *interface, dns_acl_t *localhost,
 
 	/* First add localhost address */
 	prefixlen = (netaddr->family == AF_INET) ? 32 : 128;
-	RETERR(dns_iptable_addprefix(localhost->iptable, netaddr, prefixlen,
-				     true));
+	dns_iptable_addprefix(localhost->iptable, netaddr, prefixlen,
+			      RADIX_ALLOW);
 
 	/* Then add localnets prefix */
 	result = isc_netaddr_masktoprefixlen(&interface->netmask, &prefixlen);
@@ -870,8 +878,8 @@ setup_locals(isc_interface_t *interface, dns_acl_t *localhost,
 		return ISC_R_SUCCESS;
 	}
 
-	RETERR(dns_iptable_addprefix(localnets->iptable, netaddr, prefixlen,
-				     true));
+	dns_iptable_addprefix(localnets->iptable, netaddr, prefixlen,
+			      RADIX_ALLOW);
 
 	return ISC_R_SUCCESS;
 }
@@ -1005,8 +1013,9 @@ same_listener_type(ns_interface_t *ifp, ns_listenelt_t *new_le) {
 	} else if (new_le->sslctx != NULL && ifp->tlslistensocket != NULL) {
 		/* TLS/DoT */
 		same_transport_type = true;
-	} else if (new_le->sslctx == NULL && (ifp->udplistensocket != NULL ||
-					      ifp->tcplistensocket != NULL))
+	} else if (new_le->sslctx == NULL &&
+		   (ifp->udplistener != NULL || ifp->proxyudplistener != NULL ||
+		    ifp->tcplistensocket != NULL))
 	{
 		/* "plain" DNS/Do53 */
 		same_transport_type = true;

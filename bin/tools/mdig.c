@@ -534,7 +534,7 @@ static isc_result_t
 sendquery(struct query *query) {
 	dns_request_t *request = NULL;
 	dns_message_t *message = NULL;
-	dns_name_t *qname = NULL;
+	dns_linkedname_t *qname = NULL;
 	dns_rdataset_t *qrdataset = NULL;
 	isc_result_t result;
 	dns_fixedname_t queryname;
@@ -546,8 +546,7 @@ sendquery(struct query *query) {
 	dns_fixedname_init(&queryname);
 	isc_buffer_init(&buf, query->textname, strlen(query->textname));
 	isc_buffer_add(&buf, strlen(query->textname));
-	result = dns_name_fromtext(dns_fixedname_name(&queryname), &buf,
-				   dns_rootname, 0);
+	result = dns_name_fromtext(dns_name(&queryname), &buf, dns_rootname, 0);
 	CHECKM("dns_name_fromtext", result);
 
 	dns_message_create(isc_g_mctx, NULL, NULL, DNS_MESSAGE_INTENTRENDER,
@@ -576,7 +575,7 @@ sendquery(struct query *query) {
 
 	dns_message_gettemprdataset(message, &qrdataset);
 
-	dns_name_clone(dns_fixedname_name(&queryname), qname);
+	dns_name_clone(&queryname, dns_name(qname));
 	dns_rdataset_makequestion(qrdataset, query->rdclass, query->rdtype);
 	ISC_LIST_APPEND(qname->list, qrdataset, link);
 	dns_message_addname(message, qname, DNS_SECTION_QUESTION);
@@ -1081,7 +1080,8 @@ get_reverse(char *reverse, size_t len, const char *value) {
 static void
 plus_option(char *option, struct query *query, bool global) {
 	isc_result_t result;
-	char *cmd, *value, *last = NULL, *code;
+	const char *cmd, *tail;
+	char *value, *last = NULL, *code;
 	uint32_t num;
 	bool state = true;
 	size_t n;
@@ -1092,8 +1092,9 @@ plus_option(char *option, struct query *query, bool global) {
 		printf(";; Invalid option %s\n", option);
 		return;
 	}
-	if (strncasecmp(cmd, "no", 2) == 0) {
-		cmd += 2;
+	tail = isc_string_casestripprefix(cmd, "no");
+	if (tail != NULL) {
+		cmd = tail;
 		state = false;
 	}
 	/* parse the rest of the string */
@@ -1765,6 +1766,24 @@ clone_default_query(void) {
 		memmove(query->ecs_addr, default_query.ecs_addr, len);
 	}
 
+	if (default_query.ednsopts != NULL) {
+		newopts(query);
+		for (size_t i = 0; i < default_query.ednsoptscnt; i++) {
+			query->ednsopts[i].code =
+				default_query.ednsopts[i].code;
+			if (default_query.ednsopts[i].value != NULL) {
+				query->ednsopts[i].value = isc_mem_allocate(
+					isc_g_mctx,
+					default_query.ednsopts[i].length);
+				memmove(query->ednsopts[i].value,
+					default_query.ednsopts[i].value,
+					default_query.ednsopts[i].length);
+				query->ednsopts[i].length =
+					default_query.ednsopts[i].length;
+			}
+		}
+	}
+
 	if (query->timeout == 0) {
 		query->timeout = tcp_mode ? TCPTIMEOUT : UDPTIMEOUT;
 	}
@@ -1836,6 +1855,27 @@ preparse_args(int argc, char **argv) {
 }
 
 static void
+free_query(struct query *query) {
+	if (query->ecs_addr != NULL) {
+		isc_mem_free(isc_g_mctx, query->ecs_addr);
+	}
+
+	if (query->ednsopts != NULL) {
+		for (size_t i = 0; i < EDNSOPTS; i++) {
+			if (query->ednsopts[i].value != NULL) {
+				isc_mem_free(isc_g_mctx,
+					     query->ednsopts[i].value);
+			}
+		}
+		isc_mem_free(isc_g_mctx, query->ednsopts);
+	}
+
+	if (query != &default_query) {
+		isc_mem_free(isc_g_mctx, query);
+	}
+}
+
+static void
 parse_args(bool is_batchfile, int argc, char **argv) {
 	struct query *query = NULL;
 	char batchline[MXNAME];
@@ -1894,7 +1934,7 @@ parse_args(bool is_batchfile, int argc, char **argv) {
 	rc = argc;
 	rv = argv;
 	for (rc--, rv++; rc > 0; rc--, rv++) {
-		if (strncmp(rv[0], "%", 1) == 0) {
+		if (isc_string_hasprefix(rv[0], "%")) {
 			break;
 		}
 		if (rv[0][0] == '@') {
@@ -1984,10 +2024,7 @@ parse_args(bool is_batchfile, int argc, char **argv) {
 		}
 	}
 	if (query != &default_query) {
-		if (query->ecs_addr != NULL) {
-			isc_mem_free(isc_g_mctx, query->ecs_addr);
-		}
-		isc_mem_free(isc_g_mctx, query);
+		free_query(query);
 	}
 }
 
@@ -2046,14 +2083,13 @@ setup(void *arg ISC_ATTR_UNUSED) {
 		isc_g_mctx, dispatchmgr, have_ipv4 ? dispatchvx : NULL,
 		have_ipv6 ? dispatchvx : NULL, &requestmgr));
 
-	dns_view_create(isc_g_mctx, NULL, 0, "_mdig", &view);
+	dns_view_create(isc_g_mctx, NULL, dns_rdataclass_in, "_mdig", &view);
 }
 
 /*% Main processing routine for mdig */
 int
 main(int argc, char *argv[]) {
 	isc_result_t result;
-	unsigned int i;
 	int ns;
 
 	if (isc_net_probeipv4() == ISC_R_SUCCESS) {
@@ -2129,24 +2165,10 @@ main(int argc, char *argv[]) {
 	isc_loopmgr_run();
 
 	ISC_LIST_FOREACH(queries, query, link) {
-		if (query->ednsopts != NULL) {
-			for (i = 0; i < EDNSOPTS; i++) {
-				if (query->ednsopts[i].value != NULL) {
-					isc_mem_free(isc_g_mctx,
-						     query->ednsopts[i].value);
-				}
-			}
-			isc_mem_free(isc_g_mctx, query->ednsopts);
-		}
-		if (query->ecs_addr != NULL) {
-			isc_mem_free(isc_g_mctx, query->ecs_addr);
-		}
-		isc_mem_free(isc_g_mctx, query);
+		free_query(query);
 	}
 
-	if (default_query.ecs_addr != NULL) {
-		isc_mem_free(isc_g_mctx, default_query.ecs_addr);
-	}
+	free_query(&default_query);
 
 	isc_managers_destroy();
 	return 0;

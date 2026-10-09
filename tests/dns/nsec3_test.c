@@ -24,6 +24,7 @@
 #include <cmocka.h>
 
 #include <isc/lib.h>
+#include <isc/md.h>
 #include <isc/string.h>
 #include <isc/util.h>
 
@@ -81,7 +82,7 @@ nsec3param_salttotext_test(const nsec3param_salttotext_test_params_t *params) {
 		&rdata, dns_rdataclass_in, dns_rdatatype_nsec3param, buf,
 		sizeof(buf), params->nsec3param_text, false);
 	assert_int_equal(result, ISC_R_SUCCESS);
-	result = dns_rdata_tostruct(&rdata, &nsec3param, NULL);
+	result = dns_rdata_tostruct(&rdata, &nsec3param);
 	assert_int_equal(result, ISC_R_SUCCESS);
 
 	/*
@@ -108,6 +109,111 @@ nsec3param_salttotext_test(const nsec3param_salttotext_test_params_t *params) {
 
 	result = dns_nsec3param_salttotext(&nsec3param, salt, length + 1);
 	assert_int_equal(result, ISC_R_SUCCESS);
+}
+
+ISC_RUN_TEST_IMPL(activex) {
+	isc_result_t result;
+	bool answer;
+	dns_db_t *db = NULL;
+
+	/*
+	 * Test a zone with only a NSEC3PARAM record with flags 0 and
+	 * no private type records.  All three scenarios should return
+	 * true.
+	 */
+	result = dns_test_loaddb(&db, dns_dbtype_zone, "test.test",
+				 TESTS_DIR "/testdata/nsec3/activex-1.db");
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, false, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, true, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, false, 0, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	dns_db_detach(&db);
+
+	/*
+	 * Test a zone with no NSEC3PARAM records and no private type records.
+	 * All three scenarios should return false.
+	 */
+	result = dns_test_loaddb(&db, dns_dbtype_zone, "test.test",
+				 TESTS_DIR "/testdata/nsec3/activex-2.db");
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	answer = true;
+	result = dns_nsec3_activex(db, NULL, false, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_false(answer);
+
+	answer = true;
+	result = dns_nsec3_activex(db, NULL, true, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_false(answer);
+
+	answer = true;
+	result = dns_nsec3_activex(db, NULL, false, 0, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_false(answer);
+
+	dns_db_detach(&db);
+
+	/*
+	 * Test a zone with no NSEC3PARAM records and a private CREATE record.
+	 */
+	result = dns_test_loaddb(&db, dns_dbtype_zone, "test.test",
+				 TESTS_DIR "/testdata/nsec3/activex-3.db");
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, false, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	answer = true;
+	result = dns_nsec3_activex(db, NULL, true, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_false(answer);
+
+	answer = true;
+	result = dns_nsec3_activex(db, NULL, false, 0, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_false(answer);
+
+	dns_db_detach(&db);
+
+	/*
+	 * Test a zone with an NSEC3PARAM record and a private CREATE record.
+	 */
+	result = dns_test_loaddb(&db, dns_dbtype_zone, "test.test",
+				 TESTS_DIR "/testdata/nsec3/activex-4.db");
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, false, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, true, 65534, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	answer = false;
+	result = dns_nsec3_activex(db, NULL, false, 0, &answer);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(answer);
+
+	dns_db_detach(&db);
 }
 
 /*
@@ -149,9 +255,40 @@ ISC_RUN_TEST_IMPL(nsec3param_salttotext) {
 	}
 }
 
+/* Check NSEC3 hash and owner-name generation against RFC 5155 Appendix A. */
+ISC_RUN_TEST_IMPL(hashname) {
+	static const unsigned char salt[] = { 0xaa, 0xbb, 0xcc, 0xdd };
+	unsigned char hash[NSEC3_MAX_HASH_LENGTH];
+	dns_fixedname_t expected;
+	dns_fixedname_t name;
+	dns_fixedname_t origin;
+	dns_fixedname_t result;
+	size_t hash_length = 0;
+
+	UNUSED(state);
+
+	dns_test_namefromstring("example.", &name);
+	dns_test_namefromstring("example.", &origin);
+	dns_test_namefromstring("0P9MHAVEQVM6T7VBL5LOP2U3T2RP3TOM.example.",
+				&expected);
+	dns_test_namefromstring("stale.example.", &result);
+
+	assert_int_equal(dns_nsec3_hashname(&result, hash, &hash_length,
+					    dns_fixedname_name(&name),
+					    dns_fixedname_name(&origin),
+					    dns_hash_sha1, 12, salt,
+					    sizeof(salt)),
+			 ISC_R_SUCCESS);
+	assert_int_equal(hash_length, ISC_SHA1_DIGESTLENGTH);
+	assert_true(dns_name_equal(dns_fixedname_name(&result),
+				   dns_fixedname_name(&expected)));
+}
+
 ISC_TEST_LIST_START
+ISC_TEST_ENTRY(activex)
 ISC_TEST_ENTRY(max_iterations)
 ISC_TEST_ENTRY(nsec3param_salttotext)
+ISC_TEST_ENTRY(hashname)
 ISC_TEST_LIST_END
 
 ISC_TEST_MAIN

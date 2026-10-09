@@ -363,8 +363,8 @@ echo_i "checking UDP message counts"
 ret=0
 check_count ns1 $udp1 0
 check_count ns2 $udp2 2
-check_count ns3 $udp3 4
-check_count ns5 $udp5 6
+check_count ns3 $udp3 2
+check_count ns5 $udp5 4
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 
@@ -399,7 +399,7 @@ echo_i "checking CLIENT_QUERY message counts"
 ret=0
 check_count ns1 $cq1 0
 check_count ns2 $cq2 0
-check_count ns3 $cq3 2
+check_count ns3 $cq3 1
 check_count ns5 $cq5 1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -408,7 +408,7 @@ echo_i "checking CLIENT_RESPONSE message counts"
 ret=0
 check_count ns1 $cr1 0
 check_count ns2 $cr2 0
-check_count ns3 $cr3 2
+check_count ns3 $cr3 1
 check_count ns5 $cr5 1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
@@ -436,7 +436,7 @@ ret=0
 check_count ns1 $fq1 0
 check_count ns2 $fq2 0
 check_count ns3 $fq3 0
-check_count ns5 $fq5 2
+check_count ns5 $fq5 1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 
@@ -445,7 +445,7 @@ ret=0
 check_count ns1 $fr1 0
 check_count ns2 $fr2 0
 check_count ns3 $fr3 0
-check_count ns5 $fr5 2
+check_count ns5 $fr5 1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 
@@ -489,7 +489,7 @@ fi
 echo_i "checking dnstap-read hex output"
 ret=0
 hex=$($DNSTAPREAD -x ns3/dnstap.out | tail -1)
-echo $hex | $WIRETEST >dnstap.hex
+echo $hex | $WIREFORMAT >dnstap.hex
 grep 'status: NOERROR' dnstap.hex >/dev/null 2>&1 || ret=1
 grep 'ANSWER: 3, AUTHORITY: 0' dnstap.hex >/dev/null 2>&1 || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi

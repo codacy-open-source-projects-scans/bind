@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -14,8 +14,8 @@ import os
 from ede24.common import check_ns2_ready, check_soa_servfail_ede24
 
 
-def test_ede24_noloaded(ns1, ns2):
-    check_ns2_ready(ns2)
+def test_ede24_noloaded(named_port, ns1, ns2):
+    check_ns2_ready(ns2, named_port)
 
     # Stop all servers, and we'll restart only ns2.
     ns1.stop()

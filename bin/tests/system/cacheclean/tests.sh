@@ -82,15 +82,11 @@ in_cache() {
 filter_tree() {
   tree="$1"
   file="$2"
-  perl -n -e '
-		next if /^;/;
-		if (/'"$tree"'/ || (/^\t/ && $print)) {
-			$print = 1;
-		} else {
-			$print = 0;
-		}
-		print if $print;
-	' "$file"
+  awk -v tree="$tree" '
+    /^;/ { next; }
+    { p = ($0 ~ tree || (/^\t/ && p)) ? 1 : 0; }
+    p { print; }
+  ' "$file"
 }
 
 n=$((n + 1))
@@ -276,6 +272,22 @@ ret=0
 $DIG @10.53.0.2 -p ${PORT} +expire soa expire-test >dig.out.expire || ret=1
 grep EXPIRE: dig.out.expire >/dev/null || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+
+n=$((n + 1))
+echo_i "check 'flushtree .' is equivalent to 'flush' ($n)"
+ret=0
+clear_cache
+dump_cache
+grep -v DATE ns2/named_dump.db.test$n >ns2/named_dump.db.test$n.a
+load_cache
+dump_cache
+grep -v DATE ns2/named_dump.db.test$n >ns2/named_dump.db.test$n.b
+$RNDC $RNDCOPTS flushtree . || ret=1
+dump_cache
+grep -v DATE ns2/named_dump.db.test$n >ns2/named_dump.db.test$n.c
+cmp -s ns2/named_dump.db.test$n.a ns2/named_dump.db.test$n.b && ret=1
+cmp -s ns2/named_dump.db.test$n.a ns2/named_dump.db.test$n.c || ret=1
 status=$((status + ret))
 
 echo_i "exit status: $status"

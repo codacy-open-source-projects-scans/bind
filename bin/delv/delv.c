@@ -102,7 +102,6 @@ static ns_server_t *sctx = NULL;
 static ns_interface_t *ifp = NULL;
 static dns_dispatch_t *dispatch4 = NULL;
 static dns_dispatch_t *dispatch6 = NULL;
-static dns_db_t *roothints = NULL;
 static isc_stats_t *resstats = NULL;
 static isc_statsmulti_t *resquerystats = NULL;
 static FILE *logfp = NULL;
@@ -445,7 +444,7 @@ print_status(dns_rdataset_t *rdataset) {
 }
 
 static void
-printdata(dns_rdataset_t *rdataset, dns_name_t *owner) {
+printdata(dns_rdataset_t *rdataset, const dns_name_t *owner) {
 	isc_result_t result = ISC_R_SUCCESS;
 	static dns_trust_t trust;
 	static bool first = true;
@@ -611,9 +610,9 @@ key_fromconfig(const cfg_obj_t *key, dns_client_t *client, dns_view_t *toview) {
 	dns_rdata_ds_t ds;
 	uint32_t rdata1, rdata2, rdata3;
 	const char *datastr = NULL, *keynamestr = NULL, *atstr = NULL;
-	unsigned char data[4096];
+	unsigned char data[DNS_RDATA_MAXLENGTH];
 	isc_buffer_t databuf;
-	unsigned char rrdata[4096];
+	unsigned char rrdata[DNS_RDATA_MAXLENGTH];
 	isc_buffer_t rrdatabuf;
 	isc_region_t r;
 	dns_fixedname_t fkeyname;
@@ -706,7 +705,6 @@ key_fromconfig(const cfg_obj_t *key, dns_client_t *client, dns_view_t *toview) {
 	case TRUSTED:
 		dnskey.common.rdclass = dns_rdataclass_in;
 		dnskey.common.rdtype = dns_rdatatype_dnskey;
-		dnskey.mctx = NULL;
 
 		dnskey.flags = (uint16_t)rdata1;
 		dnskey.protocol = (uint8_t)rdata2;
@@ -735,7 +733,6 @@ key_fromconfig(const cfg_obj_t *key, dns_client_t *client, dns_view_t *toview) {
 	case STATIC_DS:
 		ds.common.rdclass = dns_rdataclass_in;
 		ds.common.rdtype = dns_rdatatype_ds;
-		ds.mctx = NULL;
 
 		ds.key_tag = (uint16_t)rdata1;
 		ds.algorithm = (uint8_t)rdata2;
@@ -1047,7 +1044,8 @@ parse_uint(uint32_t *uip, const char *value, uint32_t max, const char *desc) {
 static void
 plus_option(char *option) {
 	isc_result_t result;
-	char *cmd, *value, *last = NULL;
+	const char *cmd, *tail;
+	char *value, *last = NULL;
 	bool state = true;
 
 	INSIST(option != NULL);
@@ -1057,8 +1055,9 @@ plus_option(char *option) {
 		printf(";; Invalid option %s\n", option);
 		return;
 	}
-	if (strncasecmp(cmd, "no", 2) == 0) {
-		cmd += 2;
+	tail = isc_string_casestripprefix(cmd, "no");
+	if (tail != NULL) {
+		cmd = tail;
 		state = false;
 	}
 
@@ -1839,7 +1838,7 @@ resolve_cb(dns_client_t *client, const dns_name_t *query_name,
 
 	ISC_LIST_FOREACH(*namelist, response_name, link) {
 		ISC_LIST_FOREACH(response_name->list, rdataset, link) {
-			printdata(rdataset, response_name);
+			printdata(rdataset, dns_name(response_name));
 		}
 	}
 
@@ -1911,7 +1910,9 @@ cleanup:
 	isc_mem_put(isc_g_mctx, namelist, sizeof(*namelist));
 	isc_loopmgr_shutdown();
 
-	dns_client_detach(&client);
+	if (client != NULL) {
+		dns_client_detach(&client);
+	}
 }
 
 static void
@@ -1946,7 +1947,7 @@ recvresponse(void *arg) {
 	dns_message_t *query = dns_request_getarg(request);
 	isc_result_t result = dns_request_getresult(request);
 	dns_message_t *response = NULL;
-	dns_name_t *prev = NULL;
+	const dns_name_t *prev = NULL;
 
 	if (result != ISC_R_SUCCESS) {
 		fatal("request event result: %s", isc_result_totext(result));
@@ -1967,10 +1968,11 @@ recvresponse(void *arg) {
 		goto cleanup;
 	}
 
-	MSG_SECTION_FOREACH(response, DNS_SECTION_ANSWER, name) {
+	MSG_SECTION_FOREACH(response, DNS_SECTION_ANSWER, linkedname) {
+		const dns_name_t *name = dns_name(linkedname);
 		dns_rdatatype_t prevtype = dns_rdatatype_none;
 
-		ISC_LIST_FOREACH(name->list, rdataset, link) {
+		ISC_LIST_FOREACH(linkedname->list, rdataset, link) {
 			dns_rdataset_t rds, sigs;
 			int options = 0;
 
@@ -2015,8 +2017,7 @@ recvresponse(void *arg) {
 				options |= DNS_DBFIND_PENDINGOK;
 			}
 			result = dns_view_simplefind(view, name, rdataset->type,
-						     0, options, false, &rds,
-						     &sigs);
+						     0, options, &rds, &sigs);
 			if (result == ISC_R_SUCCESS) {
 				printdata(&rds, name);
 				dns_rdataset_disassociate(&rds);
@@ -2051,7 +2052,8 @@ sendquery(void *arg) {
 	isc_sockaddr_t peer = isc_nmsocket_getaddr(sock);
 	isc_result_t result;
 	dns_message_t *message = NULL;
-	dns_name_t *query_name = NULL, *mname = NULL;
+	dns_name_t *query_name = NULL;
+	dns_linkedname_t *mname = NULL;
 	dns_rdataset_t *mrdataset = NULL;
 	dns_request_t *request = NULL;
 
@@ -2070,7 +2072,7 @@ sendquery(void *arg) {
 
 	dns_message_gettempname(message, &mname);
 	dns_message_gettemprdataset(message, &mrdataset);
-	dns_name_clone(query_name, mname);
+	dns_name_clone(query_name, dns_name(mname));
 	dns_rdataset_makequestion(mrdataset, dns_rdataclass_in, qtype);
 	ISC_LIST_APPEND(mname->list, mrdataset, link);
 	dns_message_addname(message, mname, DNS_SECTION_QUESTION);
@@ -2082,8 +2084,6 @@ sendquery(void *arg) {
 
 	CHECK(dns_requestmgr_create(isc_g_mctx, dispatchmgr, NULL, NULL,
 				    &requestmgr));
-
-	dns_view_attach(view, &(dns_view_t *){ NULL });
 
 	const unsigned int timeout = isc_nm_getinitialtimeout() / MS_PER_SEC;
 	CHECK(dns_request_create(requestmgr, message, NULL, &peer, NULL, NULL,
@@ -2116,7 +2116,7 @@ matchview(isc_netaddr_t *srcaddr, isc_netaddr_t *destaddr,
 	UNUSED(cbarg);
 	UNUSED(sigresultp);
 
-	*viewp = view;
+	dns_view_attach(view, viewp);
 	*viewpatchresultp = ISC_R_SUCCESS;
 	return ISC_R_SUCCESS;
 }
@@ -2161,12 +2161,9 @@ run_server(void *arg) {
 	dns_view_setmaxrestarts(view, restarts);
 	dns_view_setmaxqueries(view, maxtotal);
 	dns_view_setmaxdelegationservers(view, DEFAULT_MAX_DELEGATION_SERVERS);
-	dns_delegdb_create(&view->deleg);
 
-	CHECK(dns_rootns_create(isc_g_mctx, dns_rdataclass_in, hintfile,
-				&roothints));
-	dns_view_setrootdb(view, roothints);
-	dns_db_detach(&roothints);
+	dns_delegdb_create(&view->deleg);
+	CHECK(dns_rootns_filldelegdb(isc_g_mctx, hintfile, view->deleg));
 
 	view->qminimization = qmin;
 	view->qmin_strict = qmin_strict;

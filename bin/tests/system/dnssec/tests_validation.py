@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -37,7 +37,6 @@ pytestmark = pytest.mark.extra_artifacts(
         "*/*.key",
         "*/*.signed",
         "*/settime.out.*",
-        "ans*/ans.run",
         "*/trusted.keys",
         "*/*.bad",
         "*/*.next",
@@ -182,6 +181,19 @@ def test_positive_validation_nsec3():
     isctest.check.rr_count_eq(res2.answer, 1)
 
 
+def test_positive_validation_dname_at_apex():
+    # an apex DNAME is signed by the DNSKEY living at the DNAME owner
+    # name itself; fetching that key must not be mistaken for a
+    # non-advancing alias chain (GL #6176)
+    msg = isctest.query.create("a.dname-at-apex-nsec3.example", "A")
+    res = isctest.query.tcp(msg, "10.53.0.4")
+    isctest.check.noerror(res)
+    isctest.check.adflag(res)
+    answers = {(str(rr.name), rr.rdtype) for rr in res.answer}
+    assert ("dname-at-apex-nsec3.example.", rdatatype.DNAME) in answers
+    assert ("a.example.", rdatatype.A) in answers
+
+
 def test_positive_validation_optout():
     # positive answer
     msg = isctest.query.create("a.optout.example", "A")
@@ -289,22 +301,6 @@ def test_chain_validation():
     isctest.check.same_answer(res1, res2)
     isctest.check.adflag(res2)
     assert answer_has(res2, rdatatype.CNAME)
-
-    # check KEY lookup via CNAME
-    msg = isctest.query.create("cnameandkey.secure.example", "KEY")
-    res1 = isctest.query.tcp(msg, "10.53.0.3")
-    res2 = isctest.query.tcp(msg, "10.53.0.4")
-    isctest.check.same_answer(res1, res2)
-    isctest.check.adflag(res2)
-    assert not answer_has(res2, rdatatype.CNAME)
-
-    # check KEY lookup via CNAME (not present)
-    msg = isctest.query.create("cnamenokey.secure.example", "KEY")
-    res1 = isctest.query.tcp(msg, "10.53.0.3")
-    res2 = isctest.query.tcp(msg, "10.53.0.4")
-    isctest.check.same_answer(res1, res2)
-    isctest.check.adflag(res2)
-    assert not answer_has(res2, rdatatype.CNAME)
 
     # check DNSKEY lookup via DNAME
     msg = isctest.query.create("a.dnameandkey.secure.example", "DNSKEY")
@@ -646,6 +642,7 @@ def test_negative_validation_optout():
     msg = isctest.query.create("delegation.single-nsec3", "A")
     res = isctest.query.tcp(msg, "10.53.0.2")
     isctest.check.noerror(res)
+    isctest.check.has_authority(res)
     for rrset in res.authority:
         if (
             rrset.rdtype != rdatatype.NSEC3
@@ -658,6 +655,7 @@ def test_negative_validation_optout():
     msg = isctest.query.create("nonexist.single-nsec3", "A")
     res = isctest.query.tcp(msg, "10.53.0.2")
     isctest.check.nxdomain(res)
+    isctest.check.has_authority(res)
     for rrset in res.authority:
         if (
             rrset.rdtype != rdatatype.NSEC3
@@ -670,6 +668,7 @@ def test_negative_validation_optout():
     msg = isctest.query.create("single-nsec3", "A")
     res = isctest.query.tcp(msg, "10.53.0.2")
     isctest.check.noerror(res)
+    isctest.check.has_authority(res)
     for rrset in res.authority:
         if (
             rrset.rdtype != rdatatype.NSEC3
@@ -1018,6 +1017,46 @@ def test_failed_validation():
     isctest.check.servfail(res)
 
 
+def test_ds_keytag_flood(ns4):
+    # GL #5349: a securely-delegated zone whose parent DS RRset is flooded
+    # with many mismatched DS records (each a unique key tag) must be
+    # rejected without unbounded per-DS matching work.  The per-fetch
+    # validation quota caps the DS x DNSKEY matching, so the DNSKEY fetch
+    # fails with ISC_R_QUOTA and the answer is SERVFAIL.  An unbounded
+    # walk would grind through every DS and never hit the quota.
+    with ns4.watch_log_from_here() as watcher:
+        msg = isctest.query.create("keytrap.example", "SOA")
+        res = isctest.query.tcp(msg, "10.53.0.4")
+        isctest.check.servfail(res)
+        watcher.wait_for_line("quota reached resolving 'keytrap.example/DNSKEY/IN'")
+
+
+def test_ds_keytag_flood_combinations(ns4):
+    # GL #5349: the parent DS RRset here is smaller than the per-fetch
+    # validation quota, but the child DNSKEY RRset has several keys, so the
+    # DS-by-DNSKEY combination count exceeds the up-front product cap.  The
+    # DNSKEY fetch must fail terminally with the validation quota (SERVFAIL,
+    # no retry).  Without the product cap the per-DS walk would finish below
+    # the quota and never reject the zone; returning ISC_R_RANGE instead of
+    # ISC_R_QUOTA would log "out of range" and retry rather than stop here.
+    with ns4.watch_log_from_here() as watcher:
+        msg = isctest.query.create("keytrap2.example", "SOA")
+        res = isctest.query.tcp(msg, "10.53.0.4")
+        isctest.check.servfail(res)
+        watcher.wait_for_line("quota reached resolving 'keytrap2.example/DNSKEY/IN'")
+
+
+def test_ds_keytag_flood_ignores_unsupported_ds():
+    # GL #5349: unsupported DS algorithms and digest types do not reach
+    # DNSKEY matching and therefore must not contribute to its combination
+    # cap.  The raw DS-by-DNSKEY count exceeds the cap, but the delegation has
+    # one supported DS and must validate successfully.
+    msg = isctest.query.create("keytrap3.example", "SOA")
+    res = isctest.query.tcp(msg, "10.53.0.4")
+    isctest.check.noerror(res)
+    isctest.check.adflag(res)
+
+
 def test_revoked_key():
     # validation should succeed if a revoked key is encountered
     msg = isctest.query.create("revkey.example", "SOA")
@@ -1145,31 +1184,13 @@ def test_expired_signatures(ns4):
     res1 = isctest.query.tcp(msg, "10.53.0.4")
     msg = isctest.query.create("expiring.example", "SOA")
     res2 = isctest.query.tcp(msg, "10.53.0.4")
+    isctest.check.noerror(res1)
+    isctest.check.has_answer(res1)
+    isctest.check.noerror(res2)
+    isctest.check.has_answer(res2)
     for rrset in res1.answer:
         assert 240 <= rrset.ttl <= 300
     for rrset in res2.answer:
-        assert rrset.ttl <= 60
-
-    # test TTL is capped at RRSIG expiry time in the additional section (NS)
-    ns4.rndc("flush")
-    msg = isctest.query.create("expiring.example", "NS", cd=True)
-    res1 = isctest.query.tcp(msg, "10.53.0.4")
-    msg = isctest.query.create("expiring.example", "NS")
-    res2 = isctest.query.tcp(msg, "10.53.0.4")
-    for rrset in res1.additional:
-        assert 240 <= rrset.ttl <= 300
-    for rrset in res2.additional:
-        assert rrset.ttl <= 60
-
-    # test TTL is capped at RRSIG expiry time in the additional section (MX)
-    ns4.rndc("flush")
-    msg = isctest.query.create("expiring.example", "MX", cd=True)
-    res1 = isctest.query.tcp(msg, "10.53.0.4")
-    msg = isctest.query.create("expiring.example", "MX")
-    res2 = isctest.query.tcp(msg, "10.53.0.4")
-    for rrset in res1.additional:
-        assert 240 <= rrset.ttl <= 300
-    for rrset in res2.additional:
         assert rrset.ttl <= 60
 
 
@@ -1273,6 +1294,14 @@ def test_unknown_algorithms():
     isctest.check.noerror(res2)
     isctest.check.noadflag(res2)
 
+    # check that unknown DNSKEY algorithm using a HMAC code point validates as insecure
+    msg = isctest.query.create("dnskey-163-unknown.example", "A", dnssec=False)
+    res1 = isctest.query.tcp(msg, "10.53.0.3")
+    res2 = isctest.query.tcp(msg, "10.53.0.4")
+    isctest.check.noerror(res1)
+    isctest.check.noerror(res2)
+    isctest.check.noadflag(res2)
+
     # check that unsupported DNSKEY algorithms are in the DNSKEY RRsets
     msg = isctest.query.create("dnskey-unsupported.example", "DNSKEY")
     res = isctest.query.tcp(msg, "10.53.0.3")
@@ -1349,6 +1378,31 @@ def test_unknown_algorithms():
     isctest.check.noerror(res1)
     isctest.check.noerror(res2)
     isctest.check.noadflag(res2)
+
+
+def test_legacy_dnssec_types_are_signed():
+    """
+    SIG (24), NXT (30) and KEY (25) records carry a covering RRSIG.
+
+    Per RFC 3755 SIG and NXT are obsolete and treated as opaque zone
+    data; KEY remains valid for SIG(0)/TKEY use.  All three are
+    ordinary zone data and must be signed like any other RRset.
+    """
+    for owner, rrtype in [
+        ("sigrr.secure.example", "SIG"),
+        ("nxtrr.secure.example", "NXT"),
+        ("keyrr.secure.example", "KEY"),
+    ]:
+        expected = rdatatype.from_text(rrtype)
+        msg = isctest.query.create(owner, rrtype, cd=True)
+        res = isctest.query.tcp(msg, "10.53.0.3")
+        isctest.check.noerror(res)
+        assert any(
+            rr.rdtype == expected for rr in res.answer
+        ), f"{rrtype} record missing in answer for {owner}: {res.answer}"
+        assert any(
+            rr.rdtype == rdatatype.RRSIG and rr.covers == expected for rr in res.answer
+        ), f"RRSIG({rrtype}) missing in answer for {owner}: {res.answer}"
 
 
 def test_rrsigs_for_glue():

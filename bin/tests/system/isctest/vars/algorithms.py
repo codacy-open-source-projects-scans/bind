@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -19,6 +19,16 @@ import tempfile
 import time
 
 from .. import log
+from ..algorithms import (
+    ALL_ALGORITHMS,
+    ECDSAP256SHA256,
+    ECDSAP384SHA384,
+    ED448,
+    ED25519,
+    RSASHA256,
+    RSASHA512,
+    Algorithm,
+)
 from .basic import BASIC_VARS
 
 # Algorithms are selected randomly at runtime from a list of supported
@@ -55,24 +65,10 @@ STABLE_PERIOD = 3600 * 3
 """number of secs during which algorithm selection remains stable"""
 
 
-class Algorithm(NamedTuple):
-    name: str
-    number: int
-    dst: int
-    bits: int
-
-    @classmethod
-    def default(cls):
-        return cls(
-            os.environ["DEFAULT_ALGORITHM"],
-            int(os.environ["DEFAULT_ALGORITHM_NUMBER"]),
-            int(os.environ["DEFAULT_ALGORITHM_DST_NUMBER"]),
-            int(os.environ["DEFAULT_BITS"]),
-        )
-
-
 class AlgorithmSet(NamedTuple):
-    """Collection of DEFAULT, ALTERNATIVE and DISABLED algorithms"""
+    """
+    Collection of DEFAULT, ALTERNATIVE and DISABLED algorithms
+    """
 
     default: Algorithm | list[Algorithm]
     """DEFAULT is the algorithm for testing."""
@@ -85,30 +81,6 @@ class AlgorithmSet(NamedTuple):
     """DISABLED is an algorithm that is used for tests against the
     "disable-algorithms" configuration option."""
 
-
-RSASHA1 = Algorithm("RSASHA1", 5, 5, 2048)
-RSASHA256 = Algorithm("RSASHA256", 8, 8, 2048)
-RSASHA512 = Algorithm("RSASHA512", 10, 10, 2048)
-ECDSAP256SHA256 = Algorithm("ECDSAP256SHA256", 13, 13, 256)
-ECDSAP384SHA384 = Algorithm("ECDSAP384SHA384", 14, 14, 384)
-ED25519 = Algorithm("ED25519", 15, 15, 256)
-ED448 = Algorithm("ED448", 16, 16, 456)
-RSASHA256OID = Algorithm("RSASHA256OID", 254, 256, 2048)
-RSASHA512OID = Algorithm("RSASHA512OID", 254, 257, 2048)
-
-ALL_ALGORITHMS = [
-    RSASHA1,
-    RSASHA256,
-    RSASHA512,
-    ECDSAP256SHA256,
-    ECDSAP384SHA384,
-    ED25519,
-    ED448,
-    RSASHA256OID,
-    RSASHA512OID,
-]
-
-ALL_ALGORITHMS_BY_NUM = {alg.number: alg for alg in ALL_ALGORITHMS}
 
 ALGORITHM_SETS = {
     "stable": AlgorithmSet(
@@ -134,7 +106,9 @@ ALGORITHM_SETS = {
 
 
 def is_crypto_supported(alg: Algorithm) -> bool:
-    """Test whether a given algorithm is supported on the current platform."""
+    """
+    Test whether a given algorithm is supported on the current platform.
+    """
     assert alg in ALL_ALGORITHMS, f"unknown algorithm: {alg}"
     with tempfile.TemporaryDirectory() as tmpdir:
         proc = subprocess.run(
@@ -175,7 +149,9 @@ SUPPORTED_ALGORITHMS: list[Algorithm] = []
 
 
 def init_crypto_supported():
-    """Initialize the environment variables indicating cryptography support."""
+    """
+    Initialize the environment variables indicating cryptography support.
+    """
     for alg in ALL_ALGORITHMS:
         supported = is_crypto_supported(alg)
         if supported:
@@ -187,7 +163,9 @@ def init_crypto_supported():
 
 
 def _filter_supported(algs: AlgorithmSet) -> AlgorithmSet:
-    """Select supported algorithms from the set."""
+    """
+    Select supported algorithms from the set.
+    """
     filtered = {}
     for alg_type in algs._fields:
         candidates = getattr(algs, alg_type)
@@ -205,7 +183,8 @@ def _filter_supported(algs: AlgorithmSet) -> AlgorithmSet:
 
 
 def _select_random(algs: AlgorithmSet, stable_period=STABLE_PERIOD) -> AlgorithmSet:
-    """Select random DEFAULT, ALTERNATIVE and DISABLED algorithms from the set.
+    """
+    Select random DEFAULT, ALTERNATIVE and DISABLED algorithms from the set.
 
     The algorithm selection is deterministic for a given time period and
     platform. This should make potential issues more reproducible.
@@ -262,7 +241,9 @@ def _select_random(algs: AlgorithmSet, stable_period=STABLE_PERIOD) -> Algorithm
 
 
 def _algorithms_env(algs: AlgorithmSet, name: str) -> dict[str, str]:
-    """Return environment variables with selected algorithms as a dict."""
+    """
+    Return environment variables with selected algorithms as a dict.
+    """
     algs_env = {
         "ALGORITHM_SET": name,
     }

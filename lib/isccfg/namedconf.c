@@ -1176,8 +1176,8 @@ map_merge(const cfg_obj_t *config ISC_ATTR_UNUSED, cfg_obj_t *effectivemap,
 		if (effectiveres == ISC_R_NOTFOUND &&
 		    defaultres == ISC_R_SUCCESS)
 		{
-			INSIST(cfg_map_addclone(effectivemap, defaultobj,
-						clause) == ISC_R_SUCCESS);
+			INSIST(cfg_map_add(effectivemap, defaultobj, clause) ==
+			       ISC_R_SUCCESS);
 			continue;
 		}
 
@@ -1205,7 +1205,7 @@ cloneto(cfg_obj_t *options, const cfg_obj_t *obj, const char *clausename) {
 	const cfg_clausedef_t *clause = cfg_map_findclause(options->type,
 							   clausename);
 
-	result = cfg_map_addclone(options, obj, clause);
+	result = cfg_map_add(options, obj, clause);
 	INSIST(result == ISC_R_SUCCESS);
 }
 
@@ -1591,6 +1591,7 @@ static cfg_clausedef_t options_clauses[] = {
 	{ "tcp-listen-queue", &cfg_type_uint32, 0, NULL },
 	{ "tcp-primaries-timeout", &cfg_type_uint32, 0, NULL },
 	{ "tcp-receive-buffer", &cfg_type_uint32, 0, NULL },
+	{ "tcp-reuse-timeout", &cfg_type_uint32, 0, NULL },
 	{ "tcp-send-buffer", &cfg_type_uint32, 0, NULL },
 	{ "tkey-dhkey", NULL, CFG_CLAUSEFLAG_ANCIENT, NULL },
 	{ "tkey-domain", &cfg_type_qstring, CFG_CLAUSEFLAG_ANCIENT, NULL },
@@ -2392,6 +2393,7 @@ static cfg_clausedef_t view_clauses[] = {
 	{ "max-acache-size", NULL, CFG_CLAUSEFLAG_ANCIENT, NULL },
 	{ "max-cache-size", &cfg_type_maxcachesize, 0, NULL },
 	{ "max-cache-ttl", &cfg_type_duration, 0, NULL },
+	{ "max-delegation-ttl", &cfg_type_duration, 0, NULL },
 	{ "max-clients-per-query", &cfg_type_uint32, 0, NULL },
 	{ "max-delegation-servers", &cfg_type_uint32,
 	  CFG_CLAUSEFLAG_EXPERIMENTAL, NULL },
@@ -2408,6 +2410,7 @@ static cfg_clausedef_t view_clauses[] = {
 	  CFG_CLAUSEFLAG_EXPERIMENTAL, NULL },
 	{ "message-compression", &cfg_type_boolean, 0, NULL },
 	{ "min-cache-ttl", &cfg_type_duration, 0, NULL },
+	{ "min-delegation-ttl", &cfg_type_duration, 0, NULL },
 	{ "min-ncache-ttl", &cfg_type_duration, 0, NULL },
 	{ "min-roots", NULL, CFG_CLAUSEFLAG_ANCIENT, NULL },
 	{ "minimal-any", &cfg_type_boolean, 0, NULL },

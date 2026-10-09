@@ -87,6 +87,7 @@ main(int argc, char **argv) {
 	bool show_final_mem = false;
 	isc_buffer_t key_txtbuffer;
 	char key_txtsecret[256];
+	char namebuf[DNS_NAME_FORMATSIZE];
 	const char *keyname = NULL;
 	const char *serveraddr = NULL;
 	dns_secalg_t alg;
@@ -115,7 +116,7 @@ main(int argc, char **argv) {
 	isc_commandline_errprint = false;
 
 	while ((ch = isc_commandline_parse(argc, argv,
-					   "aA:b:c:hk:Mmp:r:s:t:u:Vy")) != -1)
+					   "aA:b:c:hk:Mmp:qr:s:t:u:Vy")) != -1)
 	{
 		switch (ch) {
 		case 'a':
@@ -207,6 +208,8 @@ main(int argc, char **argv) {
 		usage(EXIT_FAILURE);
 	}
 
+	makesafe_keyname(keyname, namebuf, sizeof(namebuf), NULL);
+
 	if (alg == DST_ALG_HMACMD5) {
 		fprintf(stderr, "warning: use of hmac-md5 for RNDC keys "
 				"is deprecated; hmac-sha256 is now "
@@ -224,7 +227,7 @@ main(int argc, char **argv) {
 
 	if (keyonly) {
 		write_key_file(keyfile, chrootdir == NULL ? user : NULL,
-			       keyname, &key_txtbuffer, alg);
+			       namebuf, &key_txtbuffer, alg);
 		if (!quiet) {
 			printf("wrote key file \"%s\"\n", keyfile);
 		}
@@ -236,7 +239,7 @@ main(int argc, char **argv) {
 			snprintf(buf, len, "%s%s%s", chrootdir,
 				 (*keyfile != '/') ? "/" : "", keyfile);
 
-			write_key_file(buf, user, keyname, &key_txtbuffer, alg);
+			write_key_file(buf, user, namebuf, &key_txtbuffer, alg);
 			if (!quiet) {
 				printf("wrote key file \"%s\"\n", buf);
 			}
@@ -268,13 +271,13 @@ options {\n\
 # 		allow { %s; } keys { \"%s\"; };\n\
 # };\n\
 # End of named.conf\n",
-		       keyname, algname,
+		       namebuf, algname,
 		       (int)isc_buffer_usedlength(&key_txtbuffer),
-		       (char *)isc_buffer_base(&key_txtbuffer), keyname,
-		       serveraddr, port, keyname, algname,
+		       (char *)isc_buffer_base(&key_txtbuffer), namebuf,
+		       serveraddr, port, namebuf, algname,
 		       (int)isc_buffer_usedlength(&key_txtbuffer),
 		       (char *)isc_buffer_base(&key_txtbuffer), serveraddr,
-		       port, serveraddr, keyname);
+		       port, serveraddr, namebuf);
 	}
 
 	if (show_final_mem) {

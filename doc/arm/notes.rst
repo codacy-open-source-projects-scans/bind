@@ -47,6 +47,11 @@ The list of known issues affecting the latest version in the 9.21 branch can be
 found at
 https://gitlab.isc.org/isc-projects/bind9/-/wikis/Known-Issues-in-BIND-9.21
 
+.. include:: ../notes/notes-9.21.26.rst
+.. include:: ../notes/notes-9.21.25.rst
+.. include:: ../notes/notes-9.21.24.rst
+.. include:: ../notes/notes-9.21.23.rst
+.. include:: ../notes/notes-9.21.22.rst
 .. include:: ../notes/notes-9.21.21.rst
 .. include:: ../notes/notes-9.21.20.rst
 .. include:: ../notes/notes-9.21.19.rst

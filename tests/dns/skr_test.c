@@ -40,7 +40,6 @@
 #include <dns/secalg.h>
 #include <dns/skr.h>
 #include <dns/time.h>
-#include <dns/tls.h>
 
 #include "zone_p.h"
 
@@ -168,7 +167,6 @@ write_record(FILE *fp, dns_rdatatype_t rdtype, const char *rdatastr,
 
 	/* Create a lexer as one is required by dns_rdata_fromtext(). */
 	isc_lex_create(isc_g_mctx, 64, &lex);
-	specials[0] = 1;
 	specials['('] = 1;
 	specials[')'] = 1;
 	specials['"'] = 1;
@@ -331,7 +329,7 @@ check_rrsig(dns_skrbundle_t *bundle, skr__testbundle_t *tb,
 
 		assert_int_equal(cmp, 0);
 
-		r = dns_rdata_tostruct(&sigrdata, &sig, NULL);
+		r = dns_rdata_tostruct(&sigrdata, &sig);
 		assert_int_equal(r, ISC_R_SUCCESS);
 
 		assert_int_equal(sig.timesigned, tb->inception);

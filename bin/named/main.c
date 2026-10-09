@@ -52,6 +52,7 @@
 #include <dns/lib.h>
 #include <dns/name.h>
 #include <dns/resolver.h>
+#include <dns/rootns.h>
 #include <dns/view.h>
 
 #include <dlz/dlz_dlopen_driver.h>
@@ -328,8 +329,9 @@ save_command_line(int argc, char *argv[]) {
 					continue;
 				} else {
 					char tmp[5];
-					int c = snprintf(tmp, sizeof(tmp),
-							 "\\%03o", *src++);
+					int c = snprintf(
+						tmp, sizeof(tmp), "\\%03o",
+						(unsigned char)(*src++));
 					if (dst + c >= eob) {
 						goto add_ellipsis;
 					}
@@ -356,7 +358,7 @@ add_ellipsis:
 }
 
 static int
-parse_int(char *arg, const char *desc) {
+parse_int(const char *arg, const char *desc) {
 	char *endp;
 	int tmp;
 	long int ltmp;
@@ -455,9 +457,6 @@ list_hmac_algorithms(isc_buffer_t *b) {
 	for (dst_algorithm_t i = DST_ALG_HMAC_FIRST; i <= DST_ALG_HMAC_LAST;
 	     i++)
 	{
-		if (i == DST_ALG_GSSAPI) {
-			continue;
-		}
 		if (dst_algorithm_supported(i)) {
 			isc_buffer_putstr(b, " ");
 			isc_buffer_putstr(b, dst_hmac_algorithm_totext(i));
@@ -623,20 +622,31 @@ printversion(bool verbose) {
 
 static void
 parse_fuzz_arg(void) {
-	if (!strncmp(isc_commandline_argument, "client:", 7)) {
-		named_g_fuzz_addr = isc_commandline_argument + 7;
+	const char *tail;
+	if ((tail = isc_string_stripprefix(isc_commandline_argument,
+					   "client:")) != NULL)
+	{
+		named_g_fuzz_addr = tail;
 		named_g_fuzz_type = isc_fuzz_client;
-	} else if (!strncmp(isc_commandline_argument, "tcp:", 4)) {
-		named_g_fuzz_addr = isc_commandline_argument + 4;
+	} else if ((tail = isc_string_stripprefix(isc_commandline_argument,
+						  "tcp:")) != NULL)
+	{
+		named_g_fuzz_addr = tail;
 		named_g_fuzz_type = isc_fuzz_tcpclient;
-	} else if (!strncmp(isc_commandline_argument, "resolver:", 9)) {
-		named_g_fuzz_addr = isc_commandline_argument + 9;
+	} else if ((tail = isc_string_stripprefix(isc_commandline_argument,
+						  "resolver:")) != NULL)
+	{
+		named_g_fuzz_addr = tail;
 		named_g_fuzz_type = isc_fuzz_resolver;
-	} else if (!strncmp(isc_commandline_argument, "http:", 5)) {
-		named_g_fuzz_addr = isc_commandline_argument + 5;
+	} else if ((tail = isc_string_stripprefix(isc_commandline_argument,
+						  "http:")) != NULL)
+	{
+		named_g_fuzz_addr = tail;
 		named_g_fuzz_type = isc_fuzz_http;
-	} else if (!strncmp(isc_commandline_argument, "rndc:", 5)) {
-		named_g_fuzz_addr = isc_commandline_argument + 5;
+	} else if ((tail = isc_string_stripprefix(isc_commandline_argument,
+						  "rndc:")) != NULL)
+	{
+		named_g_fuzz_addr = tail;
 		named_g_fuzz_type = isc_fuzz_rndc;
 	} else {
 		named_main_earlyfatal("unknown fuzzing type '%s'",
@@ -678,19 +688,21 @@ parse_T_opt(char *option) {
 		named_g_nosyslog = true;
 	} else if (!strcmp(option, "notcp")) {
 		notcp = true;
-	} else if (!strncmp(option, "maxcachesize=", 13)) {
-		named_g_maxcachesize = atoi(option + 13);
+	} else if ((p = isc_string_stripprefix(option, "maxcachesize=")) !=
+		   NULL)
+	{
+		named_g_maxcachesize = atoi(p);
 	} else if (!strcmp(option, "maxudp512")) {
 		maxudp = 512;
 	} else if (!strcmp(option, "maxudp1460")) {
 		maxudp = 1460;
-	} else if (!strncmp(option, "maxudp=", 7)) {
-		maxudp = atoi(option + 7);
+	} else if ((p = isc_string_stripprefix(option, "maxudp=")) != NULL) {
+		maxudp = atoi(p);
 		if (maxudp <= 0) {
 			named_main_earlyfatal("bad maxudp");
 		}
-	} else if (!strncmp(option, "bindkeys=", 9)) {
-		named_g_bindkeysfile = option + 9;
+	} else if ((p = isc_string_stripprefix(option, "bindkeys=")) != NULL) {
+		named_g_bindkeysfile = p;
 	} else if (!strncmp(option, "mkeytimers=", 11)) {
 		p = strtok_r(option + 11, "/", &last);
 		if (p == NULL) {
@@ -734,14 +746,19 @@ parse_T_opt(char *option) {
 		transferslowly = true;
 	} else if (!strcmp(option, "transferstuck")) {
 		transferstuck = true;
-	} else if (!strncmp(option, "tat=", 4)) {
-		named_g_tat_interval = atoi(option + 4);
-	} else if (!strncmp(option, "adbentrywindow=", 15)) {
-		dns_adb_entrywindow = atoi(option + 15);
-	} else if (!strncmp(option, "adbcachemin=", 12)) {
-		dns_adb_cachemin = atoi(option + 12);
-	} else if (!strncmp(option, "tcppipelining=", 14)) {
-		size_t pipelining = atoi(option + 14);
+	} else if ((p = isc_string_stripprefix(option, "tat=")) != NULL) {
+		named_g_tat_interval = atoi(p);
+	} else if ((p = isc_string_stripprefix(option, "adbentrywindow"
+						       "=")) != NULL)
+	{
+		dns_adb_entrywindow = atoi(p);
+	} else if ((p = isc_string_stripprefix(option, "adbcachemin=")) != NULL)
+	{
+		dns_adb_cachemin = atoi(p);
+	} else if ((p = isc_string_stripprefix(option, "tcppipelining"
+						       "=")) != NULL)
+	{
+		size_t pipelining = atoi(p);
 		if (pipelining < 1) {
 			named_main_earlyfatal("tcppipelining must be at "
 					      "least 1");
@@ -755,19 +772,20 @@ parse_T_opt(char *option) {
 static void
 parse_port(char *arg) {
 	enum { DNSPORT, TLSPORT, HTTPSPORT, HTTPPORT } ptype = DNSPORT;
-	char *value = arg;
+	const char *value = arg;
+	const char *tail = NULL;
 	int port;
 
-	if (strncmp(arg, "dns=", 4) == 0) {
-		value = arg + 4;
-	} else if (strncmp(arg, "tls=", 4) == 0) {
-		value = arg + 4;
+	if ((tail = isc_string_stripprefix(arg, "dns=")) != NULL) {
+		value = tail;
+	} else if ((tail = isc_string_stripprefix(arg, "tls=")) != NULL) {
+		value = tail;
 		ptype = TLSPORT;
-	} else if (strncmp(arg, "https=", 6) == 0) {
-		value = arg + 6;
+	} else if ((tail = isc_string_stripprefix(arg, "https=")) != NULL) {
+		value = tail;
 		ptype = HTTPSPORT;
-	} else if (strncmp(arg, "http=", 5) == 0) {
-		value = arg + 6;
+	} else if ((tail = isc_string_stripprefix(arg, "http=")) != NULL) {
+		value = tail;
 		ptype = HTTPPORT;
 	}
 
@@ -866,6 +884,9 @@ parse_command_line(int argc, char *argv[]) {
 			named_g_logflags = ISC_LOG_PRINTTIME | ISC_LOG_ISO8601 |
 					   ISC_LOG_TZINFO;
 			break;
+		case 'H':
+			printf("%s", dns_rootns_gethints());
+			exit(EXIT_SUCCESS);
 		case 'L':
 			named_g_logfile = isc_commandline_argument;
 			break;
@@ -1317,11 +1338,6 @@ cleanup(void) {
 	 */
 	/* xxdb_clear(); */
 
-	/*
-	 * Unregister "dlopen" DLZ driver.
-	 */
-	dlz_dlopen_clear();
-
 	isc_log_write(NAMED_LOGCATEGORY_GENERAL, NAMED_LOGMODULE_MAIN,
 		      ISC_LOG_NOTICE, "exiting");
 }
@@ -1524,6 +1540,14 @@ main(int argc, char *argv[]) {
 	}
 
 	isc_managers_destroy();
+
+	/*
+	 * Unregister the dlopen DLZ driver. This must be done after
+	 * isc_managers_destroy() to ensure that all DLZ instances have been
+	 * removed from memory (reclaimed by the RCU thread when views are
+	 * shutdown).
+	 */
+	dlz_dlopen_clear();
 
 #if ENABLE_LEAK_DETECTION
 	isc__crypto_setdestroycheck(true);

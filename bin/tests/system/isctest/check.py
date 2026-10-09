@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -47,6 +47,18 @@ def servfail(message: dns.message.Message) -> None:
     rcode(message, dns.rcode.SERVFAIL)
 
 
+def formerr(message: dns.message.Message) -> None:
+    rcode(message, dns.rcode.FORMERR)
+
+
+def aaflag(message: dns.message.Message) -> None:
+    assert (message.flags & dns.flags.AA) != 0, str(message)
+
+
+def noaaflag(message: dns.message.Message) -> None:
+    assert (message.flags & dns.flags.AA) == 0, str(message)
+
+
 def adflag(message: dns.message.Message) -> None:
     assert (message.flags & dns.flags.AD) != 0, str(message)
 
@@ -71,10 +83,20 @@ def noraflag(message: dns.message.Message) -> None:
     assert (message.flags & dns.flags.RA) == 0, str(message)
 
 
+def tcflag(message: dns.message.Message) -> None:
+    assert (message.flags & dns.flags.TC) != 0, str(message)
+
+
+def notcflag(message: dns.message.Message) -> None:
+    assert (message.flags & dns.flags.TC) == 0, str(message)
+
+
 def _extract_ede_options(
     message: dns.message.Message,
 ) -> list[EDEOption]:
-    """Extract EDE options from the DNS message."""
+    """
+    Extract EDE options from the DNS message.
+    """
     return cast(
         list[EDEOption],
         [
@@ -86,13 +108,17 @@ def _extract_ede_options(
 
 
 def noede(message: dns.message.Message) -> None:
-    """Check that message contains no EDE option."""
+    """
+    Check that message contains no EDE option.
+    """
     ede_options = _extract_ede_options(message)
     assert not ede_options, f"unexpected EDE options {ede_options} in {message}"
 
 
 def ede(message: dns.message.Message, code: EDECode, text: str | None = None) -> None:
-    """Check if message contains expected EDE code (and its text)."""
+    """
+    Check if message contains expected EDE code (and its text).
+    """
     msg_opts = _extract_ede_options(message)
     matching_opts = [opt for opt in msg_opts if opt.code == code]
 
@@ -139,7 +165,9 @@ def rrsets_equal(
     second_rrset: dns.rrset.RRset,
     compare_ttl: bool | None = False,
 ) -> None:
-    """Compare two RRset (optionally including TTL)"""
+    """
+    Compare two RRset (optionally including TTL)
+    """
 
     def compare_rrs(rr1, rrset):
         rr2 = next((other_rr for other_rr in rrset if rr1 == other_rr), None)
@@ -168,7 +196,9 @@ def zones_equal(
     second_zone: dns.zone.Zone,
     compare_ttl: bool | None = False,
 ) -> None:
-    """Compare two zones (optionally including TTL)"""
+    """
+    Compare two zones (optionally including TTL)
+    """
 
     isctest.log.debug(
         "%s() first zone:\n%s",
@@ -216,6 +246,26 @@ def single_question(message: dns.message.Message) -> None:
 
 def empty_answer(message: dns.message.Message) -> None:
     assert not message.answer, str(message)
+
+
+def empty_authority(message: dns.message.Message) -> None:
+    assert not message.authority, str(message)
+
+
+def empty_additional(message: dns.message.Message) -> None:
+    assert not message.additional, str(message)
+
+
+def has_answer(message: dns.message.Message) -> None:
+    assert message.answer, str(message)
+
+
+def has_authority(message: dns.message.Message) -> None:
+    assert message.authority, str(message)
+
+
+def has_additional(message: dns.message.Message) -> None:
+    assert message.additional, str(message)
 
 
 def rr_count_eq(section: list, expected: int):

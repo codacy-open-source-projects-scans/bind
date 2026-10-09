@@ -86,6 +86,8 @@
 
 #include <stdbool.h>
 
+#include <isc/attributes.h>
+
 #include <dns/message.h>
 #include <dns/name.h>
 #include <dns/types.h>
@@ -105,11 +107,11 @@
  * purpose the client desires.
  */
 struct dns_rdata {
-	unsigned char	*data;
+	uint16_t	 length;
 	dns_rdataclass_t rdclass;
 	dns_rdatatype_t	 type;
-	uint16_t	 length;
 	uint16_t	 flags;
+	unsigned char	*data ISC_ATTR_COUNTED_BY_PTR(length);
 	ISC_LINK(dns_rdata_t) link;
 };
 
@@ -497,6 +499,7 @@ dns_rdata_tofmttext(dns_rdata_t *rdata, const dns_name_t *origin,
  * it is undefined and falls back to the default value of 'width'
  */
 
+ISC_ATTR_WARN_UNUSED_RESULT
 isc_result_t
 dns_rdata_fromstruct(dns_rdata_t *rdata, dns_rdataclass_t rdclass,
 		     dns_rdatatype_t type, void *source, isc_buffer_t *target);
@@ -530,13 +533,11 @@ dns_rdata_fromstruct(dns_rdata_t *rdata, dns_rdataclass_t rdclass,
  */
 
 isc_result_t
-dns_rdata_tostruct(const dns_rdata_t *rdata, void *target, isc_mem_t *mctx);
+dns_rdata_tostruct(const dns_rdata_t *rdata, void *target);
 /*%<
  * Convert an rdata into its C structure representation.
  *
- * If 'mctx' is NULL then 'rdata' must persist while 'target' is being used.
- *
- * If 'mctx' is non NULL then memory will be allocated if required.
+ * The 'rdata' must persist while 'target' is being used.
  *
  * Requires:
  *
@@ -547,17 +548,6 @@ dns_rdata_tostruct(const dns_rdata_t *rdata, void *target, isc_mem_t *mctx);
  * Result:
  *\li	Success
  *\li	Not Implemented
- */
-
-void
-dns_rdata_freestruct(void *source);
-/*%<
- * Free dynamic memory attached to 'source' (if any).
- *
- * Requires:
- *
- *\li	'source' to point to the structure previously filled in by
- *	dns_rdata_tostruct().
  */
 
 unsigned int
@@ -720,20 +710,19 @@ dns_rdatatype_isknown(dns_rdatatype_t type) {
 
 /*%
  * Return true iff a query for the rdata type can have multiple
- * unrelated answers in a response: ANY, RRSIG, or SIG.
+ * unrelated answers in a response: ANY, or RRSIG.
  */
 static inline bool
 dns_rdatatype_ismulti(dns_rdatatype_t type) {
-	return type == dns_rdatatype_any || type == dns_rdatatype_rrsig ||
-	       type == dns_rdatatype_sig;
+	return type == dns_rdatatype_any || type == dns_rdatatype_rrsig;
 }
 
 /*%
- * Return true iff the rdata type is a signature: either RRSIG or SIG.
+ * Return true iff the rdata type is RRSIG.
  */
 static inline bool
 dns_rdatatype_issig(dns_rdatatype_t type) {
-	return type == dns_rdatatype_rrsig || type == dns_rdatatype_sig;
+	return type == dns_rdatatype_rrsig;
 }
 
 /*%
@@ -843,9 +832,11 @@ dns_rdata_covers(dns_rdata_t *rdata);
  *\li	The type covered.
  */
 
+#define dns_rdata_checkowner(name, rdclass, type, wildcard) \
+	dns__rdata_checkowner(DNS_NAME__RO_ARG(name), rdclass, type, wildcard)
 bool
-dns_rdata_checkowner(const dns_name_t *name, dns_rdataclass_t rdclass,
-		     dns_rdatatype_t type, bool wildcard);
+dns__rdata_checkowner(const dns_name_t *name, dns_rdataclass_t rdclass,
+		      dns_rdatatype_t type, bool wildcard);
 /*
  * Returns whether this is a valid ownername for this <type,class>.
  * If wildcard is true allow the first label to be a wildcard if
@@ -855,9 +846,11 @@ dns_rdata_checkowner(const dns_name_t *name, dns_rdataclass_t rdclass,
  *	'name' is a valid name.
  */
 
+#define dns_rdata_checknames(rdata, owner, bad) \
+	dns__rdata_checknames(rdata, DNS_NAME__RO_ARG(owner), bad)
 bool
-dns_rdata_checknames(dns_rdata_t *rdata, const dns_name_t *owner,
-		     dns_name_t *bad);
+dns__rdata_checknames(dns_rdata_t *rdata, const dns_name_t *owner,
+		      dns_name_t *bad);
 /*
  * Returns whether 'rdata' contains valid domain names.  The checks are
  * sensitive to the owner name.

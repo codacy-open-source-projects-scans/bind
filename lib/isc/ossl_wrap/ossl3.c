@@ -240,6 +240,60 @@ cleanup:
 }
 
 static isc_result_t
+generate_pkcs11_eddsa_key(char *uri, EVP_PKEY **pkeyp, const char *keytype) {
+	isc_result_t result;
+	EVP_PKEY_CTX *pctx = NULL;
+	size_t len;
+
+	INSIST(uri != NULL);
+	len = strlen(uri);
+
+	const OSSL_PARAM params[] = {
+		OSSL_PARAM_utf8_string("pkcs11_uri", uri, len),
+		OSSL_PARAM_utf8_string("pkcs11_key_usage", pkcs11_key_usage,
+				       sizeof(pkcs11_key_usage) - 1),
+		OSSL_PARAM_END,
+	};
+
+	pctx = EVP_PKEY_CTX_new_from_name(NULL, keytype, "provider=pkcs11");
+	if (pctx == NULL) {
+		CLEANUP(OSSL_WRAP_ERROR("EVP_PKEY_CTX_new_from_name"));
+	}
+
+	if (EVP_PKEY_keygen_init(pctx) != 1) {
+		CLEANUP(OSSL_WRAP_ERROR("EVP_PKEY_keygen_init"));
+	}
+
+	if (EVP_PKEY_CTX_set_params(pctx, params) != 1) {
+		CLEANUP(OSSL_WRAP_ERROR("EVP_PKEY_CTX_set_params"));
+	}
+
+	if (EVP_PKEY_generate(pctx, pkeyp) != 1) {
+		CLEANUP(OSSL_WRAP_ERROR("EVP_PKEY_generate"));
+	}
+
+	result = ISC_R_SUCCESS;
+
+cleanup:
+	EVP_PKEY_CTX_free(pctx);
+	return result;
+}
+
+isc_result_t
+isc_ossl_wrap_generate_pkcs11_ed25519_key(char *uri, EVP_PKEY **pkeyp) {
+	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
+	REQUIRE(uri != NULL);
+	return generate_pkcs11_eddsa_key(uri, pkeyp, "ED25519");
+}
+
+isc_result_t
+isc_ossl_wrap_generate_pkcs11_ed448_key(char *uri, EVP_PKEY **pkeyp) {
+	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
+	REQUIRE(uri != NULL);
+	return generate_pkcs11_eddsa_key(uri, pkeyp, "ED448");
+}
+
+static isc_result_t
 validate_ec_pkey(EVP_PKEY *pkey, const OSSL_PARAM *const curve_params) {
 	isc_result_t result;
 	const char *expected = curve_params[0].data;
@@ -523,6 +577,9 @@ isc_ossl_wrap_generate_pkcs11_rsa_key(char *uri, size_t bit_size,
 	int status;
 	size_t len;
 
+	REQUIRE(uri != NULL);
+	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
+
 	len = strlen(uri);
 	INSIST(len != 0);
 
@@ -571,14 +628,40 @@ cleanup:
 }
 
 bool
-isc_ossl_wrap_rsa_key_bits_leq(EVP_PKEY *pkey, size_t limit) {
-	size_t bits = SIZE_MAX;
+isc_ossl_wrap_rsa_exponent_is_allowed(EVP_PKEY *pkey) {
 	BIGNUM *e = NULL;
-	if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, &e) == 1) {
-		bits = BN_num_bits(e);
-		BN_free(e);
+	BIGNUM *emin = NULL;
+	BIGNUM *emax = NULL;
+	bool ok = false;
+
+	if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, &e) != 1) {
+		goto cleanup;
 	}
-	return bits <= limit;
+
+	emin = BN_new();
+	if (emin == NULL || !BN_set_word(emin, 3)) {
+		goto cleanup;
+	}
+	if (BN_hex2bn(&emax, "100000001") == 0) {
+		goto cleanup;
+	}
+
+	ok = BN_is_odd(e) && BN_cmp(e, emin) >= 0 && BN_cmp(e, emax) <= 0;
+
+cleanup:
+	BN_free(e);
+	BN_free(emin);
+	BN_free(emax);
+	return ok;
+}
+
+bool
+isc_ossl_wrap_rsa_modulus_bits_in_range(EVP_PKEY *pkey, size_t min,
+					size_t max) {
+	REQUIRE(pkey != NULL);
+
+	int bits = EVP_PKEY_bits(pkey);
+	return bits > 0 && (size_t)bits >= min && (size_t)bits <= max;
 }
 
 isc_result_t
@@ -646,8 +729,6 @@ isc_ossl_wrap_load_rsa_public_from_components(isc_ossl_wrap_rsa_components_t *c,
 	EVP_PKEY_CTX *pctx = NULL;
 	OSSL_PARAM *params = NULL;
 	isc_result_t result;
-
-	result = ISC_R_SUCCESS;
 
 	REQUIRE(pkeyp != NULL && *pkeyp == NULL);
 	REQUIRE(c != NULL && c->n != NULL && c->e != NULL);

@@ -138,12 +138,12 @@ syncptr_find_zone(sample_instance_t *inst, dns_rdata_t *rdata, dns_name_t *name,
 
 	switch (rdata->type) {
 	case dns_rdatatype_a:
-		CHECK(dns_rdata_tostruct(rdata, &ipv4, inst->mctx));
+		CHECK(dns_rdata_tostruct(rdata, &ipv4));
 		isc_netaddr_fromin(&isc_ip, &ipv4.in_addr);
 		break;
 
 	case dns_rdatatype_aaaa:
-		CHECK(dns_rdata_tostruct(rdata, &ipv6, inst->mctx));
+		CHECK(dns_rdata_tostruct(rdata, &ipv6));
 		isc_netaddr_fromin6(&isc_ip, &ipv6.in6_addr);
 		break;
 
@@ -185,12 +185,6 @@ syncptr_find_zone(sample_instance_t *inst, dns_rdata_t *rdata, dns_name_t *name,
 	}
 
 cleanup:
-	if (rdata->type == dns_rdatatype_a) {
-		dns_rdata_freestruct(&ipv4);
-	} else {
-		dns_rdata_freestruct(&ipv6);
-	}
-
 	return result;
 }
 
@@ -234,8 +228,8 @@ syncptr(sample_instance_t *inst, dns_name_t *name, dns_rdata_t *addr_rdata,
 	dns_fixedname_init(&syncptr->ptr_target_name);
 
 	/* Check if reverse zone is managed by this driver */
-	result = syncptr_find_zone(inst, addr_rdata,
-				   dns_fixedname_name(&ptr_name), &ptr_zone);
+	result = syncptr_find_zone(inst, addr_rdata, dns_name(&ptr_name),
+				   &ptr_zone);
 	if (result != ISC_R_SUCCESS) {
 		log_error_r("PTR record synchronization skipped: reverse zone "
 			    "is not managed by driver instance '%s'",
@@ -245,9 +239,8 @@ syncptr(sample_instance_t *inst, dns_name_t *name, dns_rdata_t *addr_rdata,
 
 	/* Reverse zone is managed by this driver, prepare PTR record */
 	dns_zone_attach(ptr_zone, &syncptr->zone);
-	dns_name_copy(name, dns_fixedname_name(&syncptr->ptr_target_name));
-	dns_name_clone(dns_fixedname_name(&syncptr->ptr_target_name),
-		       &ptr_struct.ptr);
+	dns_name_copy(name, dns_name(&syncptr->ptr_target_name));
+	dns_name_clone(&syncptr->ptr_target_name, &ptr_struct.ptr);
 	dns_diff_init(inst->mctx, &syncptr->diff);
 	result = dns_rdata_fromstruct(&ptr_rdata, dns_rdataclass_in,
 				      dns_rdatatype_ptr, &ptr_struct,
@@ -260,8 +253,8 @@ syncptr(sample_instance_t *inst, dns_name_t *name, dns_rdata_t *addr_rdata,
 	}
 
 	/* Create diff */
-	dns_difftuple_create(mctx, op, dns_fixedname_name(&ptr_name), ttl,
-			     &ptr_rdata, &tp);
+	dns_difftuple_create(mctx, op, dns_name(&ptr_name), ttl, &ptr_rdata,
+			     &tp);
 	dns_diff_append(&syncptr->diff, &tp);
 
 	/*

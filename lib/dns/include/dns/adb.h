@@ -217,7 +217,7 @@ struct dns_adbaddrinfo {
 };
 
 /*!<
- * When the caller recieves a callback from dns_adb_createfind(), the
+ * When the caller receives a callback from dns_adb_createfind(), the
  * argument will a pointer to the dns_adbfind_t structure, which includes
  * this includes a copy of the callback function and argument passed to
  * dns_adb_createfind(), and a dns_adbstatus_t in the 'status' field,
@@ -285,7 +285,7 @@ dns_adb_createfind(dns_adb_t *adb, isc_loop_t *loop, isc_job_cb cb, void *cbarg,
 		   const dns_name_t *name, unsigned int options,
 		   isc_stdtime_t now, in_port_t port, unsigned int depth,
 		   isc_counter_t *qc, isc_counter_t *gqc, fetchctx_t *parent,
-		   dns_adbfind_t **find);
+		   size_t maxfindlen, dns_adbfind_t **find, size_t *findlen);
 /*%<
  * Main interface for clients. The adb will look up the name given in
  * "name" and will build up a list of found addresses, and perhaps start
@@ -332,6 +332,8 @@ dns_adb_createfind(dns_adb_t *adb, isc_loop_t *loop, isc_job_cb cb, void *cbarg,
  *\li	*name is a valid dns_name_t.
  *
  *\li	find != NULL && *find == NULL.
+ *
+ *\li   findlen is optional, if not NULL, it will be set to the length of find.
  *
  * Returns:
  *

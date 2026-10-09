@@ -533,7 +533,8 @@ dst__privstruct_parse(dst_key_t *key, unsigned int alg, isc_lex_t *lex,
 				goto cleanup;
 			}
 
-			CHECK(dns_time32_fromtext(DST_AS_STR(token), &when));
+			CHECK(dns_time32_fromregion(token.value.as_textregion,
+						    &when));
 
 			dst_key_settime(key, tag, when);
 
@@ -592,8 +593,8 @@ dst__privstruct_writefile(const dst_key_t *key, const dst_private_t *priv,
 			  const char *directory) {
 	FILE *fp;
 	isc_result_t result;
-	char filename[NAME_MAX];
-	char tmpname[NAME_MAX];
+	char filename[NAME_MAX + 1];
+	char tmpname[NAME_MAX + 1];
 	char buffer[MAXFIELDSIZE * 2];
 	isc_stdtime_t when;
 	uint32_t value;
@@ -759,6 +760,16 @@ dst__privstruct_writefile(const dst_key_t *key, const dst_private_t *priv,
 
 	result = dst_key_close(tmpname, fp, filename);
 	return result;
+}
+
+isc_result_t
+dst__privelement_is_nul_terminated(const dst_private_element_t *element) {
+	if (element->length < 1 || element->data[element->length - 1] != 0 ||
+	    strlen((char *)element->data) != (size_t)element->length - 1)
+	{
+		return DST_R_INVALIDPRIVATEKEY;
+	}
+	return ISC_R_SUCCESS;
 }
 
 /*! \file */

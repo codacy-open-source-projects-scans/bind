@@ -12,7 +12,7 @@
 project(
     'bind',
     ['c'],
-    version: '9.21.22-dev',
+    version: '9.21.28-dev',
     meson_version: '>=1.3.0',
     license: 'MPL-2.0',
     default_options: {
@@ -28,6 +28,8 @@ project(
         'wrap_mode': 'nodownload',
     },
 )
+
+add_test_setup('default', is_default: true, exclude_suites: ['lint'])
 
 fs = import('fs')
 ss = import('sourceset')
@@ -98,13 +100,34 @@ fstrm_capture = find_program('fstrm_capture', required: false)
 git = find_program('git', required: false)
 jq = find_program('jq', required: false)
 nc = find_program('nc', required: false)
-python = find_program(['python3.12', 'python3.11', 'python3', 'python'], required: false)
+python = find_program(
+    [
+        'python3.14',
+        'python3.13',
+        'python3.12',
+        'python3.11',
+        'python3',
+        'python',
+    ],
+    required: false,
+)
 xmllint = find_program('xmllint', required: false)
 xsltproc = find_program('xsltproc', required: false)
 pytest = find_program(
     ['pytest-3', 'py.test-3', 'pytest', 'py.test', 'pytest-pypy'],
     required: false,
 )
+
+## Lint
+bash = find_program('bash', required: false)
+comm = find_program('comm', required: false)
+find = find_program('find', required: false)
+grep = find_program('grep', required: false)
+mktemp = find_program('mktemp', required: false)
+sed = find_program('sed', required: false)
+sort = find_program('sort', required: false)
+tr = find_program('tr', required: false)
+xargs = find_program('xargs', required: false)
 
 ## Documentation
 sphinx_build = find_program('sphinx-build', required: doc_opt)
@@ -254,10 +277,10 @@ ubsan_options = 'halt_on_error=1:abort_on_error=1:disable_coredump=0'
 # Refer to sanitize.c.in for the justification
 config_sanitize = configuration_data()
 
-config_sanitize.set10('BIND_ASAN_ENABLED', 'address' in sanitizer)
-config_sanitize.set10('BIND_LSAN_ENABLED', 'leak' in sanitizer)
-config_sanitize.set10('BIND_TSAN_ENABLED', 'thread' in sanitizer)
-config_sanitize.set10('BIND_UBSAN_ENABLED', 'undefined' in sanitizer)
+config_sanitize.set10('BIND_ASAN_ENABLED', sanitizer.contains('address'))
+config_sanitize.set10('BIND_LSAN_ENABLED', sanitizer.contains('leak'))
+config_sanitize.set10('BIND_TSAN_ENABLED', sanitizer.contains('thread'))
+config_sanitize.set10('BIND_UBSAN_ENABLED', sanitizer.contains('undefined'))
 config_sanitize.set('BIND_ASAN_OPTIONS', asan_options)
 config_sanitize.set('BIND_TSAN_OPTIONS', tsan_options)
 config_sanitize.set('BIND_UBSAN_OPTIONS', ubsan_options)
@@ -273,13 +296,12 @@ env = environment(
 )
 
 # Meson defines these variables in unit tests when not set
-test_env = environment(
-    {
-        'ASAN_OPTIONS': asan_options,
-        'TSAN_OPTIONS': tsan_options,
-        'UBSAN_OPTIONS': ubsan_options,
-    },
-)
+test_env_vars = {
+    'ASAN_OPTIONS': asan_options,
+    'TSAN_OPTIONS': tsan_options,
+    'UBSAN_OPTIONS': ubsan_options,
+}
+test_env = environment(test_env_vars)
 
 ### Configuration
 config = configuration_data()
@@ -330,12 +352,14 @@ if not cc.compiles(constexpr_test, name: 'usage of constexpr')
 endif
 
 if developer_mode
+    config.set('DEVELOPER_MODE', 1)
     config.set('ISC_LIST_CHECKINIT', 1)
     config.set('ISC_MEM_TRACKLINES', 1)
     config.set('ISC_MUTEX_ERROR_CHECK', 1)
     config.set('ISC_SOCKET_DETAILS', 1)
     config.set('ISC_STATS_CHECKUNDERFLOW', 1)
     config.set('DNS_TYPEPAIR_CHECK', 1)
+    config.set('TEST_PRIVATEDNS', 1)
 endif
 
 # mandatory builtins
@@ -386,7 +410,7 @@ else
     cc.has_function('__builtin_popcountll', required: true)
 endif
 
-foreach attr : ['malloc', 'returns_nonnull']
+foreach attr : ['malloc', 'returns_nonnull', 'warn_unused_result']
     if cc.has_function_attribute(attr)
         config.set('HAVE_FUNC_ATTRIBUTE_@0@'.format(attr.to_upper()), 1)
     endif
@@ -460,7 +484,7 @@ if cpu_family in ['arm', 'aarch64']
         instruction_test.format('yield'),
         name: 'usage of yield instruction',
     )
-        config.set('HAVE_SPARC_PAUSE', 1)
+        config.set('HAVE_ARM_YIELD', 1)
     endif
 elif cpu_family in ['sparc', 'sparc64']
     if cc.compiles(
@@ -537,6 +561,13 @@ foreach fn, header : {
     'cpuset_getaffinity': '#include <sys/cpuset.h>',
     'sched_getaffinity': '#include <sched.h>',
     'sched_yield': '#include <sched.h>',
+
+    # CSPRNG
+    'arc4random': '#include <stdlib.h>',
+
+    # C23 sized frees
+    'free_sized': '#include <stdlib.h>',
+    'free_aligned_sized': '#include <stdlib.h>',
 
     # Misc.
     'chroot': '#include <unistd.h>',
@@ -643,6 +674,21 @@ else
     config.set('HAVE_OPENSSL_3', false)
     config.set('OPENSSL_API_COMPAT', 10100)
 
+    have_openssl_aead_h = cc.has_header('openssl/aead.h', dependencies: openssl_dep)
+    config.set('HAVE_OPENSSL_AEAD_H', have_openssl_aead_h)
+    if have_openssl_aead_h
+        config.set('HAVE_EVP_AEAD_CTX_NEW', true)
+    else
+        config.set(
+            'HAVE_EVP_AEAD_CTX_NEW',
+            cc.has_function(
+                'EVP_AEAD_CTX_new',
+                dependencies: openssl_dep,
+                prefix: '#include <openssl/evp.h>',
+            ),
+        )
+    endif
+
     config.set(
         'HAVE_FIPS_MODE',
         cc.has_function(
@@ -669,12 +715,18 @@ foreach fn, header : {
     'BIO_write_ex': '#include <openssl/bio.h>',
     'EVP_PKEY_eq': '#include <openssl/evp.h>',
     'SSL_CTX_set1_cert_store': '#include <openssl/ssl.h>',
+    'CRYPTO_chacha_20': '#include <openssl/chacha.h>',
 }
     config.set10(
         'HAVE_@0@'.format(fn.to_upper()),
         cc.has_function(fn, dependencies: openssl_dep, prefix: header),
     )
 endforeach
+
+config.set(
+    'HAVE_OPENSSL_HKDF_H',
+    cc.has_header('openssl/hkdf.h', dependencies: openssl_dep),
+)
 
 ## libuv
 uv_dep = dependency('libuv', version: '>=1.34.0')
@@ -725,8 +777,18 @@ endif
 # not add it automatically - we need to add it explicitly in such case.
 
 if urcu_dep[1].version().version_compare('<0.13.0')
-    urcu_dep += cc.find_library('liburcu-common')
+    urcu_dep += cc.find_library('urcu-common')
 endif
+
+foreach h : [
+    'urcu/uatomic.h',
+    'urcu/assert.h',
+    'urcu/pointer.h',
+]
+    if cc.has_header(h, dependencies: urcu_dep)
+        config.set('HAVE_@0@'.format(h.underscorify().to_upper()), 1)
+    endif
+endforeach
 
 config.set_quoted('RCU_FLAVOR', f'liburcu-@rcu_flavor@')
 config.set_quoted('RCU_VERSION', urcu_dep[0].version())
@@ -757,32 +819,6 @@ if jemalloc_opt.allowed()
         config.set('HAVE_JEMALLOC', 1)
     endif
 endif
-
-foreach fn : [
-    'malloc_usable_size',
-]
-    if cc.has_function(
-        fn,
-        prefix: '#include <malloc.h>',
-        args: sys_defines,
-        dependencies: thread_dep,
-    )
-        config.set('HAVE_@0@'.format(fn.to_upper()), 1)
-    endif
-endforeach
-
-foreach fn : [
-    'malloc_size',
-]
-    if cc.has_function(
-        fn,
-        prefix: '#include <malloc/malloc.h>',
-        args: sys_defines,
-        dependencies: thread_dep,
-    )
-        config.set('HAVE_@0@'.format(fn.to_upper()), 1)
-    endif
-endforeach
 
 ## dnstap
 dnstap_dep = null_dep # Will be filled later
@@ -897,6 +933,13 @@ if cap_dep.found()
     config.set('HAVE_LIBCAP', 1)
 endif
 
+## libscf (Solaris SMF)
+scf_dep = null_dep
+if host_machine.system() == 'sunos'
+    scf_dep = cc.find_library('scf', has_headers: 'libscf.h', required: false)
+    config.set('HAVE_LIBSCF', scf_dep.found())
+endif
+
 ## IDN
 idn2_dep = null_dep
 if idn_opt.allowed()
@@ -945,7 +988,7 @@ dtrace_header = generator(
     arguments: ['-s', '@INPUT@', '-h', '-o', '@OUTPUT@'],
 )
 
-# Acutally, dtrace probes are still built with macOS.
+# Actually, dtrace probes are still built with macOS.
 # macOS flavored dtrace doesn't recognize the -G option and
 # only uses headers.
 #
@@ -953,8 +996,7 @@ dtrace_header = generator(
 # to be able to disable it. You can just not use the probes.
 config.set(
     'HAVE_DTRACE',
-    dtrace.full_path() != dtrace_shim
-    and build_machine.system() != 'darwin',
+    dtrace.full_path() != dtrace_shim and host_machine.system() != 'darwin',
 )
 cc.has_header('sys/sdt.h', required: tracing_opt)
 assert(
@@ -1190,6 +1232,7 @@ nsupdate_src = []
 rndc_confgen_src = []
 rndc_src = []
 tsig_keygen_src = []
+wireformat_src = []
 
 filter_a_src = []
 filter_aaaa_src = []
@@ -1715,6 +1758,7 @@ executable(
         lmdb_dep,
         nghttp2_dep,
         ngtcp2_dep,
+        scf_dep,
         xml2_dep,
         zlib_dep,
 
@@ -1818,6 +1862,19 @@ executable(
     ],
 )
 
+executable(
+    'named-wireformat',
+    wireformat_src,
+    export_dynamic: true,
+    implicit_include_directories: false,
+    install: true,
+    sources: default_sanitize_options,
+    dependencies: [
+        libdns_dep,
+        libisc_dep,
+    ],
+)
+
 install_symlink(
     'ddns-confgen',
     pointing_to: 'tsig-keygen',
@@ -1872,6 +1929,13 @@ subdir('doc')
 subdir('tests')
 
 foreach name, sources : fuzz_binaries
+    # Only fuzz_dns_qp uses the qp test helpers; give it just those sources
+    # rather than the whole libbindtest library (see libtest_qp_dep).
+    fuzz_deps = [libdns_dep, libisc_dep]
+    if name == 'fuzz_dns_qp'
+        fuzz_deps += libtest_qp_dep
+    endif
+
     fuzz_bin = executable(
         name,
         sources,
@@ -1879,13 +1943,10 @@ foreach name, sources : fuzz_binaries
         implicit_include_directories: true,
         install: false,
         c_args: ['-Wno-vla'],
+        include_directories: test_inc,
         link_args: fuzz_link_args,
         sources: default_sanitize_options,
-        dependencies: [
-            libdns_dep,
-            libisc_dep,
-            libtest_dep,
-        ],
+        dependencies: fuzz_deps,
     )
 
     test(
@@ -1978,8 +2039,8 @@ if doc_opt.allowed()
 
         rst_epilog = f'''.. |rndc_conf| replace:: ``@sysconfdir@/rndc.conf``
 .. |rndc_key| replace:: ``@sysconfdir@/rndc.key``
-.. |named_conf| replace:: ``@sysconfdir@/named.key``
-.. |named_pid| replace:: ``@runstatedir@/named.key``
+.. |named_conf| replace:: ``@sysconfdir@/named.conf``
+.. |named_pid| replace:: ``@runstatedir@/named.pid``
 .. |session_key| replace:: ``@runstatedir@/session.key``
 '''
 
@@ -2096,6 +2157,106 @@ if doc_opt.allowed()
 endif
 
 ###
+### Project Lints
+###
+
+# meson_version (>=1.11.2) : depends arg in test can take programs
+if git.found()
+    test(
+        'gitignore',
+        sh,
+        suite: 'lint',
+        args: ['util/check-gitignore.sh'],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+
+    test(
+        'trailing-whitespace',
+        sh,
+        suite: 'lint',
+        args: ['util/check-trailing-whitespace.sh'],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+
+    test(
+        'conf-indentation',
+        sh,
+        suite: 'lint',
+        args: ['util/check-conf-indentation.sh'],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+
+    test(
+        'jinja-include-indentation',
+        sh,
+        suite: 'lint',
+        args: ['util/check-jinja-include-indentation.sh'],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+
+    if grep.found() and xargs.found()
+        test(
+            'checklibs',
+            sh,
+            suite: 'lint',
+            args: ['util/checklibs.sh'],
+            verbose: true,
+            workdir: meson.project_source_root(),
+        )
+    endif
+
+    if grep.found() and sed.found() and sort.found()
+        test(
+            'unused-headers',
+            sh,
+            suite: 'lint',
+            args: ['util/unused-headers.sh'],
+            verbose: true,
+            workdir: meson.project_source_root(),
+        )
+    endif
+endif
+
+if grep.found() and sed.found() and sort.found() and tr.found()
+    test(
+        'categories',
+        sh,
+        suite: 'lint',
+        args: ['util/check-categories.sh'],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+endif
+
+if bash.found() and comm.found() and grep.found() and mktemp.found() and sed.found() and sort.found()
+    test(
+        'rdata-registration',
+        bash,
+        suite: 'lint',
+        args: ['util/check-rdata-registration.sh', meson.project_build_root()],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+endif
+
+if find.found() and grep.found()
+    test(
+        'dangling-symlink',
+        sh,
+        suite: 'lint',
+        args: [
+            '-c', 'if find . -type l ! -exec test -e {} \\; -print | grep .; then exit 1; fi',
+        ],
+        verbose: true,
+        workdir: meson.project_source_root(),
+    )
+endif
+
+###
 ### Summary
 ###
 
@@ -2128,6 +2289,7 @@ summary(
         'libcap': cap_dep.version(),
         'libedit': edit_dep.version(),
         'libidn2': idn2_dep.version(),
+        'libscf': scf_dep.found(),
         'libxml2': xml2_dep.version(),
         'LMDB': lmdb_dep.version(),
         'MaxMindDB': maxminddb_dep.version(),

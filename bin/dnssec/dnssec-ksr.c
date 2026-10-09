@@ -19,6 +19,7 @@
 #include <isc/buffer.h>
 #include <isc/commandline.h>
 #include <isc/crypto.h>
+#include <isc/dir.h> /* Required on GNU/Hurd */
 #include <isc/lex.h>
 #include <isc/lib.h>
 #include <isc/mem.h>
@@ -29,6 +30,7 @@
 #include <dns/keymgr.h>
 #include <dns/keyvalues.h>
 #include <dns/lib.h>
+#include <dns/rdata.h>
 #include <dns/rdataclass.h>
 #include <dns/rdatalist.h>
 #include <dns/rdataset.h>
@@ -573,7 +575,7 @@ print_dnskeys(dns_kasp_key_t *kaspkey, dns_ttl_t ttl, dns_dnsseckeylist_t *keys,
 		isc_buffer_t *newbuf = NULL;
 		dns_rdata_t *rdata = NULL;
 		isc_region_t r;
-		unsigned char rdatabuf[DST_KEY_MAXSIZE];
+		unsigned char rdatabuf[DNS_RDATA_MAXLENGTH];
 
 		rdata = isc_mem_get(isc_g_mctx, sizeof(*rdata));
 		dns_rdata_init(rdata);
@@ -656,7 +658,7 @@ sign_rrset(ksr_ctx_t *ksr, isc_stdtime_t inception, isc_stdtime_t expiration,
 		dns_rdata_t rdata = DNS_RDATA_INIT;
 		dns_rdata_t *rrsig = NULL;
 		isc_region_t rs;
-		unsigned char rdatabuf[SIG_FORMATSIZE];
+		unsigned char rdatabuf[DNS_RDATA_MAXLENGTH];
 		isc_stdtime_t clockskew = inception - 3600;
 
 		isc_stdtime_t pub = 0, act = 0, inact = 0, del = 0;
@@ -744,8 +746,7 @@ get_keymaterial(ksr_ctx_t *ksr, dns_kasp_t *kasp, isc_stdtime_t inception,
 		isc_region_t r;
 		isc_region_t rcds;
 		isc_stdtime_t pub = 0, del = 0;
-		unsigned char kskbuf[DST_KEY_MAXSIZE];
-		unsigned char cdnskeybuf[DST_KEY_MAXSIZE];
+		unsigned char rdatabuf[DNS_RDATA_MAXLENGTH];
 		unsigned char cdsbuf[DNS_DS_BUFFERSIZE];
 
 		/* KSK */
@@ -766,7 +767,7 @@ get_keymaterial(ksr_ctx_t *ksr, dns_kasp_t *kasp, isc_stdtime_t inception,
 			rdata = isc_mem_get(isc_g_mctx, sizeof(*rdata));
 			dns_rdata_init(rdata);
 
-			isc_buffer_init(&buf, kskbuf, sizeof(kskbuf));
+			isc_buffer_init(&buf, rdatabuf, sizeof(rdatabuf));
 			CHECK(dst_key_todns(dk->key, &buf));
 			isc_buffer_usedregion(&buf, &r);
 			isc_buffer_allocate(isc_g_mctx, &newbuf, r.length);
@@ -810,7 +811,7 @@ get_keymaterial(ksr_ctx_t *ksr, dns_kasp_t *kasp, isc_stdtime_t inception,
 		rdata = isc_mem_get(isc_g_mctx, sizeof(*rdata));
 		dns_rdata_init(rdata);
 
-		isc_buffer_init(&buf, cdnskeybuf, sizeof(cdnskeybuf));
+		isc_buffer_init(&buf, rdatabuf, sizeof(rdatabuf));
 		CHECK(dst_key_todns(dk->key, &buf));
 		isc_buffer_usedregion(&buf, &r);
 		isc_buffer_allocate(isc_g_mctx, &newbuf, r.length);
@@ -1242,9 +1243,13 @@ sign(ksr_ctx_t *ksr) {
 			isc_buffer_t *newbuf = NULL;
 			dns_rdata_t *rdata = NULL;
 			isc_region_t r;
-			u_char rdatabuf[DST_KEY_MAXSIZE];
+			uint8_t rdatabuf[DNS_RDATA_MAXLENGTH];
 
-			INSIST(rdatalist != NULL);
+			if (rdatalist == NULL) {
+				fatal("bad KSR file %s(%lu): DNSKEY record "
+				      "before ';; KeySigningRequest' header",
+				      ksr->file, isc_lex_getsourceline(lex));
+			}
 
 			rdata = isc_mem_get(isc_g_mctx, sizeof(*rdata));
 			dns_rdata_init(rdata);
@@ -1261,7 +1266,7 @@ sign(ksr_ctx_t *ksr) {
 			isc_buffer_usedregion(newbuf, &r);
 			dns_rdata_fromregion(rdata, dns_rdataclass_in,
 					     dns_rdatatype_dnskey, &r);
-			if (rdatalist != NULL && ttl < rdatalist->ttl) {
+			if (ttl < rdatalist->ttl) {
 				rdatalist->ttl = ttl;
 			}
 

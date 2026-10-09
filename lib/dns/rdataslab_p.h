@@ -17,18 +17,12 @@
 
 #include <dns/rdataslab.h>
 
-#define ANCIENT(header)                                \
-	((atomic_load_acquire(&(header)->attributes) & \
-	  DNS_SLABHEADERATTR_ANCIENT) != 0)
 #define CASEFULLYLOWER(header)                         \
 	((atomic_load_acquire(&(header)->attributes) & \
 	  DNS_SLABHEADERATTR_CASEFULLYLOWER) != 0)
 #define CASESET(header)                                \
 	((atomic_load_acquire(&(header)->attributes) & \
 	  DNS_SLABHEADERATTR_CASESET) != 0)
-#define EXISTS(header)                                 \
-	((atomic_load_acquire(&(header)->attributes) & \
-	  DNS_SLABHEADERATTR_NONEXISTENT) == 0)
 #define IGNORE(header)                                 \
 	((atomic_load_acquire(&(header)->attributes) & \
 	  DNS_SLABHEADERATTR_IGNORE) != 0)

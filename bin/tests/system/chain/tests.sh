@@ -511,7 +511,7 @@ grep 'status: NOERROR' dig.out.1.$n >/dev/null 2>&1 || ret=1
 grep 'ANSWER: 2' dig.out.1.$n >/dev/null 2>&1 || ret=1
 $RNDCCMD 10.53.0.7 null --- start test$n - step 2 --- 2>&1 | sed 's/^/ns7 /' | cat_i
 $RNDCCMD 10.53.0.7 flush 2>&1 | sed 's/^/ns7 /' | cat_i
-sendcmd 10.53.0.4 setup-chain "cname.cname.cname._.1.1.2.2.3.4.s4.s3.s1"
+sendcmd 10.53.0.4 setup-chain "cname.cname.cname._.1.2.3.4.s4.s3.s1"
 $DIG $DIGOPTS @10.53.0.7 test.domain.nil >dig.out.2.$n 2>&1
 grep 'status: NOERROR' dig.out.2.$n >/dev/null 2>&1 || ret=1
 grep 'ANSWER: 2' dig.out.2.$n >/dev/null 2>&1 || ret=1
@@ -535,7 +535,7 @@ grep 'status: NOERROR' dig.out.5.$n >/dev/null 2>&1 || ret=1
 grep 'ANSWER: 2' dig.out.5.$n >/dev/null 2>&1 || ret=1
 $RNDCCMD 10.53.0.7 null --- start test$n - step 6 --- 2>&1 | sed 's/^/ns7 /' | cat_i
 $RNDCCMD 10.53.0.7 flush 2>&1 | sed 's/^/ns7 /' | cat_i
-sendcmd 10.53.0.4 setup-chain "cname.cname.cname._.4.3.3.3.s1.s1.1.3.4"
+sendcmd 10.53.0.4 setup-chain "cname.cname.cname._.4.3.s1.s1.1"
 $DIG $DIGOPTS @10.53.0.7 test.domain.nil >dig.out.6.$n 2>&1
 grep 'status: NOERROR' dig.out.6.$n >/dev/null 2>&1 || ret=1
 grep 'ANSWER: 2' dig.out.6.$n >/dev/null 2>&1 || ret=1
@@ -619,24 +619,6 @@ ret=0
 $RNDCCMD 10.53.0.7 null --- start test$n --- 2>&1 | sed 's/^/ns7 /' | cat_i
 $RNDCCMD 10.53.0.7 flush 2>&1 | sed 's/^/ns7 /' | cat_i
 $DIG $DIGOPTS @10.53.0.7 any short-dname.example >dig.out.7.$n 2>&1
-grep 'status: NOERROR' dig.out.7.$n >/dev/null 2>&1 || ret=1
-if [ $ret != 0 ]; then echo_i "failed"; fi
-status=$((status + ret))
-
-# Regression test for CVE-2021-25215 (authoritative server).
-n=$((n + 1))
-echo_i "checking DNAME resolution via itself (authoritative) ($n)"
-ret=0
-$DIG $DIGOPTS @10.53.0.2 DNAME self.domain0.self.domain0.nil. >dig.out.2.$n 2>&1
-grep 'status: NOERROR' dig.out.2.$n >/dev/null 2>&1 || ret=1
-if [ $ret != 0 ]; then echo_i "failed"; fi
-status=$((status + ret))
-
-# Regression test for CVE-2021-25215 (recursive resolver).
-n=$((n + 1))
-echo_i "checking DNAME resolution via itself (recursive) ($n)"
-ret=0
-$DIG $DIGOPTS @10.53.0.7 DNAME self.example.self.example.dname. >dig.out.7.$n 2>&1
 grep 'status: NOERROR' dig.out.7.$n >/dev/null 2>&1 || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))

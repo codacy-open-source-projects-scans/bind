@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -15,6 +15,7 @@ import subprocess
 from .basic import BASIC_VARS
 
 FEATURES = {
+    "DEVELOPER": "--enable-developer",
     "DNSTAP": "--enable-dnstap",
     "EXTENDED_DS_DIGEST": "--extended-ds-digest",
     "FIPS_DH": "--have-fips-dh",
@@ -33,7 +34,7 @@ FEATURES = {
     "ZLIB": "--with-zlib",
 }
 
-FEATURE_VARS = {}
+FEATURE_VARS: dict[str, str] = {}
 
 
 def feature_test(feature):
@@ -50,7 +51,9 @@ def feature_test(feature):
 
 
 def init_features():
-    """Initialize the environment variables indicating feature support."""
+    """
+    Initialize the environment variables indicating feature support.
+    """
     for name, arg in FEATURES.items():
         supported = feature_test(arg)
         envvar = f"FEATURE_{name}"

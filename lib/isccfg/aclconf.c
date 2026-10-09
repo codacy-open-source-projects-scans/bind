@@ -11,12 +11,14 @@
  * information regarding copyright ownership.
  */
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
 #include <isc/log.h>
 #include <isc/mem.h>
+#include <isc/parseint.h>
 #include <isc/string.h>
 #include <isc/util.h>
 
@@ -151,15 +153,14 @@ convert_keyname(const cfg_obj_t *keyobj, isc_mem_t *mctx, dns_name_t *dnsname) {
 	isc_buffer_constinit(&buf, txtname, keylen);
 	isc_buffer_add(&buf, keylen);
 	dns_fixedname_init(&fixname);
-	result = dns_name_fromtext(dns_fixedname_name(&fixname), &buf,
-				   dns_rootname, 0);
+	result = dns_name_fromtext(dns_name(&fixname), &buf, dns_rootname, 0);
 	if (result != ISC_R_SUCCESS) {
 		cfg_obj_log(keyobj, ISC_LOG_WARNING,
 			    "key name '%s' is not a valid domain name",
 			    txtname);
 		return result;
 	}
-	dns_name_dup(dns_fixedname_name(&fixname), mctx, dnsname);
+	dns_name_dup(&fixname, mctx, dnsname);
 	return ISC_R_SUCCESS;
 }
 
@@ -315,7 +316,6 @@ get_subtype(const cfg_obj_t *obj, dns_geoip_subtype_t subtype,
 	 */
 	case dns_geoip_city_name:
 	case dns_geoip_city_postalcode:
-	case dns_geoip_city_metrocode:
 	case dns_geoip_city_areacode:
 	case dns_geoip_city_timezonecode:
 		if (strcasecmp(dbname, "city") != 0) {
@@ -396,7 +396,6 @@ geoip_can_answer(dns_aclelement_t *elt, cfg_aclconfctx_t *ctx) {
 	case dns_geoip_city_regionname:
 	case dns_geoip_city_name:
 	case dns_geoip_city_postalcode:
-	case dns_geoip_city_metrocode:
 	case dns_geoip_city_areacode:
 	case dns_geoip_city_continentcode:
 	case dns_geoip_city_continent:
@@ -528,11 +527,6 @@ parse_geoip_element(const cfg_obj_t *obj, cfg_aclconfctx_t *ctx,
 				    "geoiop postal code (%s) too long", search);
 			return ISC_R_FAILURE;
 		}
-	} else if (strcasecmp(stype, "metro") == 0 ||
-		   strcasecmp(stype, "metrocode") == 0)
-	{
-		subtype = dns_geoip_city_metrocode;
-		de.geoip_elem.as_int = atoi(search);
 	} else if (strcasecmp(stype, "tz") == 0 ||
 		   strcasecmp(stype, "timezone") == 0)
 	{
@@ -544,7 +538,22 @@ parse_geoip_element(const cfg_obj_t *obj, cfg_aclconfctx_t *ctx,
 		strlcpy(de.geoip_elem.as_string, search,
 			sizeof(de.geoip_elem.as_string));
 	} else if (strcasecmp(stype, "asnum") == 0) {
+		const char *s = search;
+		const char *tail;
+		uint32_t val;
+
+		/* check asnum validity */
 		subtype = dns_geoip_as_asnum;
+		tail = isc_string_casestripprefix(s, "AS");
+		if (tail != NULL) {
+			s = tail;
+		}
+		if (isc_parse_uint32(&val, s, 10) != ISC_R_SUCCESS) {
+			cfg_obj_log(obj, ISC_LOG_ERROR, "invalid asnum '%s'",
+				    search);
+			return ISC_R_UNEXPECTEDTOKEN;
+		}
+
 		strlcpy(de.geoip_elem.as_string, search,
 			sizeof(de.geoip_elem.as_string));
 	} else if (strcasecmp(stype, "org") == 0) {
@@ -751,8 +760,9 @@ cfg_acl_fromconfig(const cfg_obj_t *acl_data, const cfg_obj_t *cctx,
 			 * the nestedacl element, not the iptable entry.
 			 */
 			setpos = (nest_level != 0 || !neg);
-			CHECK(dns_iptable_addprefix(iptab, &addr, bitlen,
-						    setpos));
+			dns_iptable_addprefix(iptab, &addr, bitlen,
+					      setpos ? RADIX_ALLOW
+						     : RADIX_DENY);
 
 			if (nest_level > 0) {
 				INSIST(dacl->length < dacl->alloc);
@@ -821,8 +831,9 @@ cfg_acl_fromconfig(const cfg_obj_t *acl_data, const cfg_obj_t *cctx,
 			if (strcasecmp(name, "any") == 0) {
 				/* Iptable entry with zero bit length. */
 				setpos = (nest_level != 0 || !neg);
-				CHECK(dns_iptable_addprefix(iptab, NULL, 0,
-							    setpos));
+				dns_iptable_addprefix(iptab, NULL, 0,
+						      setpos ? RADIX_ALLOW
+							     : RADIX_DENY);
 
 				if (nest_level != 0) {
 					INSIST(dacl->length < dacl->alloc);
@@ -840,8 +851,9 @@ cfg_acl_fromconfig(const cfg_obj_t *acl_data, const cfg_obj_t *cctx,
 				 * "!none;".
 				 */
 				setpos = (nest_level != 0 || neg);
-				CHECK(dns_iptable_addprefix(iptab, NULL, 0,
-							    setpos));
+				dns_iptable_addprefix(iptab, NULL, 0,
+						      setpos ? RADIX_ALLOW
+							     : RADIX_DENY);
 
 				if (!neg) {
 					dacl->has_negatives = !neg;

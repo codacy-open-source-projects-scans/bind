@@ -52,14 +52,12 @@ struct named_server {
 
 	ns_server_t *sctx;
 
-	char *statsfile;    /*%< Statistics file name */
-	char *dumpfile;	    /*%< Dump file name */
-	char *secrootsfile; /*%< Secroots file name */
-	char *recfile;	    /*%< Recursive file name */
-	bool  version_set;  /*%< User has set version */
-	char *version;	    /*%< User-specified version */
-	bool  hostname_set; /*%< User has set hostname */
-	char *hostname;	    /*%< User-specified hostname */
+	char	    *statsfile;	   /*%< Statistics file name */
+	char	    *dumpfile;	   /*%< Dump file name */
+	char	    *secrootsfile; /*%< Secroots file name */
+	char	    *recfile;	   /*%< Recursive file name */
+	isc_region_t version;	   /*%< User-specified version */
+	isc_region_t hostname;	   /*%< User-specified hostname */
 
 	/* Server data structures. */
 	dns_zonemgr_t	  *zonemgr;
@@ -109,8 +107,7 @@ struct named_server {
 	isc_signal_t *sigusr1;
 
 	cfg_aclconfctx_t *aclctx;
-	isc_buffer_t	 *userconftext;
-	isc_buffer_t	 *effectivetext;
+	cfg_obj_t	 *userconfig;
 	cfg_obj_t	 *effectiveconfig;
 };
 
@@ -360,13 +357,6 @@ named_server_zonestatus(named_server_t *server, isc_lex_t *lex,
 isc_result_t
 named_server_nta(named_server_t *server, isc_lex_t *lex, bool readonly,
 		 isc_buffer_t *text);
-
-/*%
- * Generates a test sequence that is only for use in system tests. The
- * argument is the size of required output in bytes.
- */
-isc_result_t
-named_server_testgen(isc_lex_t *lex, isc_buffer_t *text);
 
 /*%
  * Force fefresh or print status for managed keys zones.

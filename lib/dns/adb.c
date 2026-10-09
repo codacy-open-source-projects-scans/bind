@@ -566,6 +566,9 @@ import_rdataset(dns_adbname_t *adbname, dns_rdataset_t *rdataset,
 
 	rdtype = rdataset->type;
 
+	REQUIRE(rdataset->rdclass == dns_rdataclass_in);
+	REQUIRE(dns_rdatatype_isaddr(rdtype));
+
 	switch (rdataset->trust) {
 	case dns_trust_glue:
 	case dns_trust_additional:
@@ -583,8 +586,6 @@ import_rdataset(dns_adbname_t *adbname, dns_rdataset_t *rdataset,
 	default:
 		rdataset->ttl = ttlclamp(rdataset->ttl);
 	}
-
-	REQUIRE(dns_rdatatype_isaddr(rdtype));
 
 	DNS_RDATASET_FOREACH(rdataset) {
 		/* FIXME: Move to a separate function */
@@ -1084,7 +1085,7 @@ free_adbfind(dns_adbfind_t **findp) {
 	REQUIRE(!ISC_LINK_LINKED(find, plink));
 	REQUIRE(find->adbname == NULL);
 
-	find->magic = 0;
+	find->magic = ~DNS_ADBFIND_MAGIC;
 
 	isc_mutex_destroy(&find->lock);
 
@@ -1370,8 +1371,10 @@ log_quota(dns_adbentry_t *entry, const char *fmt, ...) {
 }
 
 static void
-copy_namehook_lists(dns_adb_t *adb, dns_adbfind_t *find, dns_adbname_t *name) {
+copy_namehook_lists(dns_adb_t *adb, dns_adbfind_t *find, dns_adbname_t *name,
+		    size_t maxfindlen, size_t *findlen) {
 	dns_adbentry_t *entry = NULL;
+	size_t count = 0;
 
 	if ((find->options & DNS_ADBFIND_INET) != 0) {
 		ISC_LIST_FOREACH(name->v4, namehook, name_link) {
@@ -1391,6 +1394,12 @@ copy_namehook_lists(dns_adb_t *adb, dns_adbfind_t *find, dns_adbname_t *name) {
 			 * Found a valid entry.  Add it to the find's list.
 			 */
 			ISC_LIST_APPEND(find->list, addrinfo, publink);
+
+			count++;
+			if (maxfindlen - count == 0) {
+				SET_IF_NOT_NULL(findlen, count);
+				return;
+			}
 		}
 	}
 
@@ -1412,8 +1421,16 @@ copy_namehook_lists(dns_adb_t *adb, dns_adbfind_t *find, dns_adbname_t *name) {
 			 * Found a valid entry.  Add it to the find's list.
 			 */
 			ISC_LIST_APPEND(find->list, addrinfo, publink);
+
+			count++;
+			if (maxfindlen - count == 0) {
+				SET_IF_NOT_NULL(findlen, count);
+				return;
+			}
 		}
 	}
+
+	SET_IF_NOT_NULL(findlen, count);
 }
 
 static bool
@@ -1735,7 +1752,7 @@ out:
 void
 dns_adb_createaddrinfosfind(dns_adb_t *adb, isc_netaddrlist_t *addrs,
 			    in_port_t port, unsigned int options,
-			    isc_stdtime_t now, size_t maxaddrs,
+			    isc_stdtime_t now, size_t maxfindlen,
 			    dns_adbfind_t **findp, size_t *findlen) {
 	dns_adbfind_t *find = NULL;
 	isc_sockaddr_t sockaddr = {};
@@ -1743,7 +1760,7 @@ dns_adb_createaddrinfosfind(dns_adb_t *adb, isc_netaddrlist_t *addrs,
 	REQUIRE(DNS_ADB_VALID(adb));
 	REQUIRE(addrs != NULL);
 	REQUIRE(findp != NULL && *findp == NULL);
-	REQUIRE(maxaddrs > 0);
+	REQUIRE(maxfindlen > 0);
 
 	rcu_read_lock();
 
@@ -1794,7 +1811,7 @@ dns_adb_createaddrinfosfind(dns_adb_t *adb, isc_netaddrlist_t *addrs,
 		ISC_LIST_APPEND(find->list, addrinfo, publink);
 		(*findlen)++;
 
-		if (maxaddrs - *findlen == 0) {
+		if (maxfindlen - *findlen == 0) {
 			break;
 		}
 	}
@@ -1825,7 +1842,7 @@ dns_adb_createfind(dns_adb_t *adb, isc_loop_t *loop, isc_job_cb cb, void *cbarg,
 		   const dns_name_t *name, unsigned int options,
 		   isc_stdtime_t now, in_port_t port, unsigned int depth,
 		   isc_counter_t *qc, isc_counter_t *gqc, fetchctx_t *parent,
-		   dns_adbfind_t **findp) {
+		   size_t maxfindlen, dns_adbfind_t **findp, size_t *findlen) {
 	isc_result_t result = ISC_R_UNEXPECTED;
 	dns_adbfind_t *find = NULL;
 	dns_adbname_t *adbname = NULL;
@@ -1844,6 +1861,7 @@ dns_adb_createfind(dns_adb_t *adb, isc_loop_t *loop, isc_job_cb cb, void *cbarg,
 	}
 	REQUIRE(name != NULL);
 	REQUIRE(findp != NULL && *findp == NULL);
+	REQUIRE(maxfindlen > 0);
 
 	REQUIRE((options & DNS_ADBFIND_ADDRESSMASK) != 0);
 
@@ -2056,7 +2074,7 @@ fetch:
 	 * Run through the name and copy out the bits we are
 	 * interested in.
 	 */
-	copy_namehook_lists(adb, find, adbname);
+	copy_namehook_lists(adb, find, adbname, maxfindlen, findlen);
 
 post_copy:
 	if (NAME_FETCH_A(adbname)) {
@@ -2153,6 +2171,8 @@ dns_adb_destroyfind(dns_adbfind_t **findp) {
 
 	DP(DEF_LEVEL, "dns_adb_destroyfind on find %p", find);
 
+	REQUIRE(find->loop == NULL || isc_loop() == find->loop);
+
 	adb = find->adb;
 
 	LOCK(&find->lock);
@@ -2178,6 +2198,8 @@ dns_adb_destroyfind(dns_adbfind_t **findp) {
  */
 static void
 find_sendevent(dns_adbfind_t *find) {
+	REQUIRE(find->loop != NULL && isc_loop() == find->loop);
+
 	if (!FIND_EVENTSENT(find)) {
 		atomic_store(&find->status, DNS_ADB_CANCELED);
 
@@ -2195,6 +2217,7 @@ dns_adb_cancelfind(dns_adbfind_t *find) {
 
 	REQUIRE(DNS_ADBFIND_VALID(find));
 	REQUIRE(DNS_ADB_VALID(find->adb));
+	REQUIRE(find->loop != NULL && isc_loop() == find->loop);
 
 	LOCK(&find->lock);
 	REQUIRE(FIND_WANTEVENT(find));
@@ -2562,9 +2585,8 @@ dbfind_name(dns_adbname_t *adbname, isc_stdtime_t now, dns_rdatatype_t rdtype) {
 		options |= DNS_DBFIND_PENDINGOK;
 	}
 	result = dns_view_find(adb->view, adbname->name, rdtype, now, options,
-			       true,
 			       (adbname->type & DNS_ADBFIND_STARTATZONE) != 0,
-			       NULL, NULL, fname, &rdataset, NULL);
+			       NULL, fname, &rdataset, NULL);
 
 	switch (result) {
 	case DNS_R_GLUE:

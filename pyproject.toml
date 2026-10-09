@@ -40,7 +40,7 @@ ignore-paths = [
   ".git",
   # Temporary directories created by the system test runner
   # (see bin/tests/system/conftest.py:system_test_dir)
-  "bin/tests/system/.*_tmp_.*/",
+  "bin/tests/system/.*-tmp-.*/",
   "bin/tests/system/vulture_ignore_list.py",
   "contrib",
   "dangerfile.py",
@@ -59,6 +59,8 @@ source-roots = [
 load-plugins = [
   "re_compile_checker",
   "dns_import_checker",
+  "docstring_format_checker",
+  "file_header_checker",
 ]
 
 [tool.vulture]
@@ -67,6 +69,7 @@ paths = [
 ]
 exclude = [
   "*ans.py",
+  "*/ans[0-9]*/*",
   "contrib",
   "*doc/arm/_ext/*conf.py",
   "doc/arm/conf.py",
@@ -74,6 +77,8 @@ exclude = [
   "isctest",
   "re_compile_checker.py",
   "dns_import_checker.py",
+  "docstring_format_checker.py",
+  "file_header_checker.py",
 ]
 ignore_decorators = [
   "@pytest.fixture",
@@ -87,6 +92,7 @@ ignore_names = [
   # - bin/tests/system/rollover-multisigner/tests_rollover_multisigner.py
   "private",
   "legacy",
+  "ednsflags",
 ]
 
 [tool.ruff]

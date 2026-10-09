@@ -1,19 +1,12 @@
 options {
-	port @PORT@;
-	pid-file "named.pid";
-	listen-on { 10.53.0.2; };
-	listen-on-v6 { none; };
+	{% include_indented "_common/options.conf.j2" %}
 	allow-query { any; };
 	recursion no;
 	allow-new-zones yes;
 	dnssec-validation no;
 };
 
-include "../../_common/rndc.key";
-
-controls {
-	inet 10.53.0.2 port @CONTROLPORT@ allow { any; } keys { rndc_key; };
-};
+{% include "_common/controls.conf.j2" %}
 
 template primary {
 	type primary;
@@ -21,10 +14,16 @@ template primary {
 	initial-file "added.db";
 };
 
-zone "." {
-	type hint;
-	file "../../_common/root.hint";
+template bad {
+	type secondary;
+	primaries { 10.53.0.1; };
+	max-refresh-time 0;
+	max-retry-time 0;
+	min-refresh-time 0;
+	min-retry-time 0;
 };
+
+{% include "_common/root.hint.conf" %}
 
 zone "normal.example" {
 	type primary;

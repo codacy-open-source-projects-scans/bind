@@ -305,12 +305,10 @@ copy_list(cfg_obj_t *to, const cfg_obj_t *from) {
 
 static void
 copy_tuple(cfg_obj_t *to, const cfg_obj_t *from) {
-	const cfg_tuplefielddef_t *fields = from->type->of;
 	size_t size = 0;
 
-	fields = from->type->of;
-	for (const cfg_tuplefielddef_t *field = fields; field->name != NULL;
-	     field++)
+	for (const cfg_tuplefielddef_t *field = from->type->of;
+	     field->name != NULL; field++)
 	{
 		size++;
 	}
@@ -691,7 +689,6 @@ parser_create(cfg_parser_t **ret) {
 	pctx->errors = 0;
 	pctx->warnings = 0;
 	pctx->open_files = NULL;
-	pctx->closed_files = NULL;
 	pctx->line = 0;
 	pctx->token.type = isc_tokentype_unknown;
 	pctx->flags = 0;
@@ -714,8 +711,6 @@ parser_create(cfg_parser_t **ret) {
 
 	create_list(cfg_parser_currentfile(pctx), pctx->line,
 		    &cfg_type_filelist, &pctx->open_files);
-	create_list(cfg_parser_currentfile(pctx), pctx->line,
-		    &cfg_type_filelist, &pctx->closed_files);
 
 	*ret = pctx;
 }
@@ -735,7 +730,6 @@ parser_destroy(cfg_parser_t **pctxp) {
 	 * by closing the lexer.
 	 */
 	CLEANUP_OBJ(pctx->open_files);
-	CLEANUP_OBJ(pctx->closed_files);
 	isc_mem_put(isc_g_mctx, pctx, sizeof(*pctx));
 }
 
@@ -801,13 +795,13 @@ cleanup:
 
 #define REQUIRE_PCTX_FLAGS(flags)                                        \
 	REQUIRE((flags & ~(CFG_PCTX_NODEPRECATED | CFG_PCTX_NOOBSOLETE | \
-			   CFG_PCTX_NOEXPERIMENTAL | CFG_PCTX_BUILTIN)) == 0)
+			   CFG_PCTX_NOEXPERIMENTAL | CFG_PCTX_BUILTIN |  \
+			   CFG_PCTX_ALLCONFIGS)) == 0)
 
 isc_result_t
 cfg_parse_file(const char *filename, const cfg_type_t *type, unsigned int flags,
 	       cfg_obj_t **ret) {
 	isc_result_t result;
-	cfg_listelt_t *elt;
 	cfg_parser_t *pctx = NULL;
 
 	REQUIRE(filename != NULL);
@@ -822,11 +816,17 @@ cfg_parse_file(const char *filename, const cfg_type_t *type, unsigned int flags,
 
 	result = parse2(pctx, type, ret);
 
-	/* Clean up the opened file */
-	elt = ISC_LIST_TAIL(*pctx->open_files->value.list);
-	INSIST(elt != NULL);
-	ISC_LIST_UNLINK(*pctx->open_files->value.list, elt, link);
-	ISC_LIST_APPEND(*pctx->closed_files->value.list, elt, link);
+	/*
+	 * Clean up the opened file. There are specific cases (unexpected EOF)
+	 * where included files wouldn't have been removed from the
+	 * `open_files`. In principle `parse2()` should take care of this (as it
+	 * does when correctly closing the file within the lexer) but there are
+	 * complex interactions with `cfg_parser_error()`. This would require
+	 * some wider rework.
+	 */
+	ISC_LIST_FOREACH(*pctx->open_files->value.list, name, link) {
+		cfg_list_unlink(pctx->open_files, name);
+	}
 
 cleanup:
 	parser_destroy(&pctx);
@@ -2948,8 +2948,12 @@ cfg_map_findclause(const cfg_type_t *map, const char *name) {
 	REQUIRE(name != NULL);
 
 	found = cfg_map_firstclause(map, &clauses, &idx);
-	while (name != NULL && strcasecmp(name, found->name)) {
+	while (found != NULL && name != NULL && strcasecmp(name, found->name)) {
 		found = cfg_map_nextclause(map, &clauses, &idx);
+	}
+
+	if (found == NULL) {
+		return found;
 	}
 
 	return ((cfg_clausedef_t *)clauses) + idx;
@@ -2990,6 +2994,18 @@ parse_token(cfg_parser_t *pctx, const cfg_type_t *type ISC_ATTR_UNUSED,
 
 cleanup:
 	if (obj != NULL) {
+		/*
+		 * This is an odd specific case.
+		 *
+		 * `cfg_obj_detach()` can't be used here because if no token is
+		 * found, and obj->value.string == NULL. And because `obj` type
+		 * representation is a string, the free_string() function would
+		 * attempt to free a NULL pointer.
+		 *
+		 * As a consequence, we need to detach the file, otherwise it
+		 * will leak.
+		 */
+		cfg_obj_detach(&obj->file);
 		isc_mem_put(isc_g_mctx, obj, sizeof(*obj));
 	}
 	return result;
@@ -3679,13 +3695,18 @@ redo:
 				elt = ISC_LIST_TAIL(
 					*pctx->open_files->value.list);
 				INSIST(elt != NULL);
-				ISC_LIST_UNLINK(*pctx->open_files->value.list,
-						elt, link);
-				ISC_LIST_APPEND(*pctx->closed_files->value.list,
-						elt, link);
+				cfg_list_unlink(pctx->open_files, elt);
 				goto redo;
 			}
 			pctx->seen_eof = true;
+		} else if (isc_token_hasnul(&pctx->token)) {
+			/*
+			 * An embedded NUL would be silently truncated once
+			 * the token is turned into a C string, so reject it.
+			 */
+			cfg_parser_error(pctx, CFG_LOG_NEAR,
+					 "string contains embedded NUL");
+			result = ISC_R_UNEXPECTEDTOKEN;
 		}
 		break;
 
@@ -4043,25 +4064,8 @@ map_define(cfg_obj_t *mapobj, cfg_obj_t *obj, const cfg_clausedef_t *clause) {
 }
 
 isc_result_t
-cfg_map_add(cfg_obj_t *mapobj, cfg_obj_t *obj, const char *clausename) {
-	const cfg_clausedef_t *clause;
-
-	REQUIRE(VALID_CFGOBJ(obj));
-	REQUIRE(VALID_CFGOBJ(mapobj));
-	REQUIRE(mapobj->type->rep == &cfg_rep_map);
-	REQUIRE(clausename != NULL);
-
-	clause = cfg_map_findclause(mapobj->type, clausename);
-	if (clause == NULL || clause->name == NULL) {
-		return ISC_R_FAILURE;
-	}
-
-	return map_define(mapobj, obj, clause);
-}
-
-isc_result_t
-cfg_map_addclone(cfg_obj_t *map, const cfg_obj_t *obj,
-		 const cfg_clausedef_t *clause) {
+cfg_map_add(cfg_obj_t *map, const cfg_obj_t *obj,
+	    const cfg_clausedef_t *clause) {
 	isc_result_t result = ISC_R_SUCCESS;
 	cfg_obj_t *clone = NULL;
 

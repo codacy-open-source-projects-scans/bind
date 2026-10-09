@@ -225,11 +225,8 @@ dns_zonemgr_forcemaint(dns_zonemgr_t *zmgr) {
 
 	RWLOCK(&zmgr->rwlock, isc_rwlocktype_read);
 	ISC_LIST_FOREACH(zmgr->zones, zone, link) {
-		isc_time_t now;
-
 		LOCK_ZONE(zone);
-		now = isc_time_now();
-		dns__zone_settimer(zone, &now);
+		dns__zone_settimer(zone, isc_time_now());
 		UNLOCK_ZONE(zone);
 	}
 	RWUNLOCK(&zmgr->rwlock, isc_rwlocktype_read);
@@ -390,10 +387,11 @@ got_transfer_quota(void *arg) {
 
 	primaryaddr = dns_remote_curraddr(&zone->primaries);
 	isc_sockaddr_format(&primaryaddr, primary, sizeof(primary));
+	sourceaddr = zone_addr_tosockaddr(&zone->sourceaddr);
 	if (dns_unreachcache_find(zone->view->unreachcache, &primaryaddr,
-				  &zone->sourceaddr) == ISC_R_SUCCESS)
+				  &sourceaddr) == ISC_R_SUCCESS)
 	{
-		isc_sockaddr_format(&zone->sourceaddr, source, sizeof(source));
+		isc_sockaddr_format(&sourceaddr, source, sizeof(source));
 		dns_zone_logc(zone, DNS_LOGCATEGORY_XFER_IN, ISC_LOG_INFO,
 			      "got_transfer_quota: skipping zone transfer as "
 			      "primary %s (source %s) is unreachable (cached)",
@@ -525,7 +523,7 @@ got_transfer_quota(void *arg) {
 	}
 
 	LOCK_ZONE(zone);
-	sourceaddr = zone->sourceaddr;
+	sourceaddr = zone_addr_tosockaddr(&zone->sourceaddr);
 	UNLOCK_ZONE(zone);
 
 	INSIST(isc_sockaddr_pf(&primaryaddr) == isc_sockaddr_pf(&sourceaddr));

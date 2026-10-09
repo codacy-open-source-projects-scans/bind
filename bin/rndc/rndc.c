@@ -79,6 +79,7 @@ static uint32_t serial;
 static bool quiet = false;
 static bool showresult = false;
 static int32_t timeout = RNDC_TIMEOUT;
+static bool debug_response = false;
 
 static void
 rndc_startconnect(isc_sockaddr_t *addr);
@@ -239,7 +240,7 @@ Version: %s\n",
 	exit(status);
 }
 
-#define CMDLINE_FLAGS "46b:c:hk:Mmp:qrs:t:Vy:"
+#define CMDLINE_FLAGS "46b:c:dhk:Mmp:qrs:t:Vy:"
 
 static void
 preparse_args(int argc, char **argv) {
@@ -297,6 +298,29 @@ rndc_senddone(isc_nmhandle_t *handle ISC_ATTR_UNUSED, isc_result_t result,
 }
 
 static void
+validate_response(isccc_sexpr_t *response) {
+	isccc_sexpr_t *_ctrl = NULL;
+	uint32_t rpl = 0, ser = ~serial;
+
+	_ctrl = isccc_alist_lookup(response, "_ctrl");
+	if (!isccc_alist_alistp(_ctrl)) {
+		fatal("bad or missing ctrl section in response");
+	}
+
+	if (isccc_cc_lookupuint32(_ctrl, "_rpl", &rpl) != ISC_R_SUCCESS ||
+	    rpl != 1)
+	{
+		fatal("bad or missing ctrl.rpl section in response");
+	}
+
+	if (isccc_cc_lookupuint32(_ctrl, "_ser", &ser) != ISC_R_SUCCESS ||
+	    ser != serial)
+	{
+		fatal("bad or missing ctrl.ser section in response");
+	}
+}
+
+static void
 rndc_recvdone(isc_nmhandle_t *handle, isc_result_t result, void *arg) {
 	isccc_ccmsg_t *ccmsg = (isccc_ccmsg_t *)arg;
 	isccc_sexpr_t *response = NULL;
@@ -325,6 +349,13 @@ rndc_recvdone(isc_nmhandle_t *handle, isc_result_t result, void *arg) {
 
 	DO("parse message",
 	   isccc_cc_fromwire(&source, &response, algorithm, &secret));
+
+	if (debug_response) {
+		isccc_sexpr_print(response, stderr);
+		fprintf(stderr, "\n");
+	}
+
+	validate_response(response);
 
 	data = isccc_alist_lookup(response, "_data");
 	if (!isccc_alist_alistp(data)) {
@@ -401,10 +432,13 @@ rndc_recvnonce(isc_nmhandle_t *handle ISC_ATTR_UNUSED, isc_result_t result,
 	DO("parse message",
 	   isccc_cc_fromwire(&source, &response, algorithm, &secret));
 
+	validate_response(response);
+
 	_ctrl = isccc_alist_lookup(response, "_ctrl");
 	if (!isccc_alist_alistp(_ctrl)) {
 		fatal("bad or missing ctrl section in response");
 	}
+
 	nonce = 0;
 	if (isccc_cc_lookupuint32(_ctrl, "_nonce", &nonce) != ISC_R_SUCCESS) {
 		nonce = 0;
@@ -864,6 +898,10 @@ main(int argc, char **argv) {
 		case 'c':
 			admin_conffile = isc_commandline_argument;
 			c_flag = true;
+			break;
+
+		case 'd': /* undocumented */
+			debug_response = true;
 			break;
 
 		case 'k':

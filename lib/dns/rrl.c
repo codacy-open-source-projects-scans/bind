@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
+#include <isc/hash.h>
 #include <isc/log.h>
 #include <isc/mem.h>
 #include <isc/net.h>
@@ -39,13 +40,15 @@
 #include <dns/zone.h>
 #include <dns/zoneproperties.h>
 
+#define DNS_RRL_MAX_EVICTION_PROBES 64
+
 static void
 log_end(dns_rrl_t *rrl, dns_rrl_entry_t *e, bool early, char *log_buf,
 	unsigned int log_buf_len);
 
 /*
  * Get a modulus for a hash function that is tolerably likely to be
- * relatively prime to most inputs.  Of course, we get a prime for for initial
+ * relatively prime to most inputs.  Of course, we get a prime for initial
  * values not larger than the square of the last prime.  We often get a prime
  * after that.
  * This works well in practice for hash tables up to at least 100
@@ -372,14 +375,12 @@ key_cmp(const dns_rrl_key_t *a, const dns_rrl_key_t *b) {
 
 static uint32_t
 hash_key(const dns_rrl_key_t *key) {
-	uint32_t hval;
-	int i;
-
-	hval = key->w[0];
-	for (i = sizeof(key->w) / sizeof(key->w[0]) - 1; i >= 0; --i) {
-		hval = key->w[i] + (hval << 1);
-	}
-	return hval;
+	/*
+	 * The key includes attacker-controlled bits (client /24, qname
+	 * hash, qtype). Use the keyed, per-process-randomised hash so
+	 * collisions cannot be engineered to overload one bucket chain.
+	 */
+	return isc_hash32(key, sizeof(*key), true);
 }
 
 /*
@@ -558,31 +559,37 @@ get_entry(dns_rrl_t *rrl, const isc_sockaddr_t *client_addr, dns_zone_t *zone,
 	}
 
 	/*
-	 * The entry does not exist, so create it by finding a free entry.
-	 * Keep currently penalized and logged entries.
-	 * Try to make more entries if none are idle.
-	 * Steal the oldest entry if we cannot create more.
+	 * The entry does not exist, so create it by finding a free entry or
+	 * one whose balance has recovered.  Limit the search to avoid an
+	 * unbounded walk under rrl->lock.  Try to make more entries if none
+	 * are found, or recycle the oldest entry if we cannot create more.
 	 */
 	dns_rrl_entry_t *entry = NULL;
-	ISC_LIST_FOREACH_REV(rrl->lru, e, lru) {
-		entry = e;
-		if (!ISC_LINK_LINKED(e, hlink)) {
+	size_t probes_left = DNS_RRL_MAX_EVICTION_PROBES;
+	for (entry = ISC_LIST_TAIL(rrl->lru); entry != NULL && probes_left > 0;
+	     entry = ISC_LIST_PREV(entry, lru), probes_left--)
+	{
+		if (!ISC_LINK_LINKED(entry, hlink)) {
 			break;
 		}
-		age = get_age(rrl, e, now);
+
+		age = get_age(rrl, entry, now);
 		if (age <= 1) {
 			entry = NULL;
 			break;
 		}
-		if (!e->logged && response_balance(rrl, e, age) > 0) {
+
+		if (response_balance(rrl, entry, age) > 0) {
 			break;
 		}
 	}
 
-	if (entry == NULL) {
+	if (entry == NULL || probes_left == 0) {
 		expand_entries(rrl, ISC_MIN((rrl->num_entries + 1) / 2, 1000));
 		entry = ISC_LIST_TAIL(rrl->lru);
 	}
+
+	INSIST(entry != NULL);
 	if (entry->logged) {
 		log_end(rrl, entry, true, log_buf, log_buf_len);
 	}
@@ -645,7 +652,7 @@ debit_rrl_entry(dns_rrl_t *rrl, dns_rrl_entry_t *e, double qps, double scale,
 			rrl, client_addr, NULL, 0, dns_rdatatype_none, NULL,
 			DNS_RRL_RTYPE_TCP, now, false, log_buf, log_buf_len);
 		if (credit_e != NULL) {
-			age = get_age(rrl, e, now);
+			age = get_age(rrl, credit_e, now);
 			if (age < rrl->window) {
 				scale = 1.0;
 			}
@@ -923,12 +930,11 @@ make_log_buf(dns_rrl_t *rrl, dns_rrl_entry_t *e, const char *str1,
 				e->log_qname = qbuf->index;
 				qbuf->e = e;
 				dns_fixedname_init(&qbuf->qname);
-				dns_name_copy(qname,
-					      dns_fixedname_name(&qbuf->qname));
+				dns_name_copy(qname, dns_name(&qbuf->qname));
 			}
 		}
 		if (qbuf != NULL) {
-			qname = dns_fixedname_name(&qbuf->qname);
+			qname = dns_name(&qbuf->qname);
 		}
 		if (qname != NULL) {
 			ADD_LOG_CSTR(&lb, " for ");

@@ -1,0 +1,10 @@
+options {
+	{% include_indented "_common/options.conf.j2" %}
+	max-cache-size 8000;
+};
+
+statistics-channels {
+	inet @ns.ip@ port @EXTRAPORT1@;
+};
+
+{% include "_common/controls.conf.j2" %}

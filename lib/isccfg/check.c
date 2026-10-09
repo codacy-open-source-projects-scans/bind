@@ -51,6 +51,7 @@
 #include <dns/keystore.h>
 #include <dns/keyvalues.h>
 #include <dns/peer.h>
+#include <dns/rdata.h>
 #include <dns/rdataclass.h>
 #include <dns/rdatatype.h>
 #include <dns/rpz.h>
@@ -143,8 +144,8 @@ check_orderent(const cfg_obj_t *ent) {
 		str = cfg_obj_asstring(obj);
 		isc_buffer_constinit(&b, str, strlen(str));
 		isc_buffer_add(&b, strlen(str));
-		tresult = dns_name_fromtext(dns_fixedname_name(&fixed), &b,
-					    dns_rootname, 0);
+		tresult = dns_name_fromtext(dns_name(&fixed), &b, dns_rootname,
+					    0);
 		if (tresult != ISC_R_SUCCESS) {
 			cfg_obj_log(obj, ISC_LOG_ERROR,
 				    "rrset-order: invalid name '%s'", str);
@@ -963,8 +964,8 @@ check_name(const char *str) {
 	dns_fixedname_t fixed;
 
 	dns_fixedname_init(&fixed);
-	return dns_name_fromstring(dns_fixedname_name(&fixed), str,
-				   dns_rootname, 0, NULL);
+	return dns_name_fromstring(dns_name(&fixed), str, dns_rootname, 0,
+				   NULL);
 }
 
 static bool
@@ -1179,6 +1180,34 @@ check_port(const cfg_obj_t *options, const char *type, in_port_t *portp) {
 }
 
 static isc_result_t
+check_delegation_ttl(const cfg_obj_t *options) {
+	uint32_t min = 0, max = 0;
+	const cfg_obj_t *obj = NULL;
+
+	(void)cfg_map_get(options, "min-delegation-ttl", &obj);
+	if (obj != NULL) {
+		min = cfg_obj_asduration(obj);
+	}
+
+	obj = NULL;
+	(void)cfg_map_get(options, "max-delegation-ttl", &obj);
+	if (obj != NULL) {
+		max = cfg_obj_asduration(obj);
+	}
+
+	if (min != 0 && max != 0 && min >= max) {
+		cfg_obj_log(
+			obj, ISC_LOG_ERROR,
+			"When 'min-delegation-ttl' and 'max-delegation-ttl' "
+			"are both positive, 'min-delegation-ttl' must be "
+			"strictly less than 'max-delegation-ttl'");
+		return ISC_R_RANGE;
+	}
+
+	return ISC_R_SUCCESS;
+}
+
+static isc_result_t
 check_options(const cfg_obj_t *options, const cfg_obj_t *config,
 	      bool check_algorithms, isc_mem_t *mctx, optlevel_t optlevel) {
 	isc_result_t result = ISC_R_SUCCESS;
@@ -1217,6 +1246,14 @@ check_options(const cfg_obj_t *options, const cfg_obj_t *config,
 	static const char *server_contact[] = { "empty-server", "empty-contact",
 						"dns64-server", "dns64-contact",
 						NULL };
+
+#ifndef IOV_MAX
+/*
+ * FSTRM_IOTHR_INPUT_QUEUE_SIZE_MAX is defined as IOV_MAX, but IOV_MAX can be
+ * undefined.
+ */
+#define IOV_MAX 1024
+#endif /* ifndef IOV_MAX */
 
 #ifdef HAVE_DNSTAP
 	static fstrmtable fstrm[] = {
@@ -1282,6 +1319,11 @@ check_options(const cfg_obj_t *options, const cfg_obj_t *config,
 				}
 			}
 		}
+
+		tresult = check_delegation_ttl(options);
+		if (tresult != ISC_R_SUCCESS) {
+			result = tresult;
+		}
 	}
 
 	/*
@@ -1346,8 +1388,8 @@ check_options(const cfg_obj_t *options, const cfg_obj_t *config,
 						    DNS_KEYSTORE_KEYDIRECTORY);
 					if (result == ISC_R_SUCCESS) {
 						result = ISC_R_FAILURE;
-						continue;
 					}
+					continue;
 				}
 
 				kopt = cfg_tuple_get(kconfig, "options");
@@ -2176,9 +2218,11 @@ check_httpserver(const cfg_obj_t *http, isc_symtab_t *symtab) {
 	/* Check endpoints are valid */
 	tresult = cfg_map_get(http, "endpoints", &eps);
 	if (tresult == ISC_R_SUCCESS) {
+		bool empty = true;
 		CFG_LIST_FOREACH(eps, elt) {
 			const cfg_obj_t *ep = cfg_listelt_value(elt);
 			const char *path = cfg_obj_asstring(ep);
+			empty = false;
 			if (!isc_nm_http_path_isvalid(path)) {
 				cfg_obj_log(eps, ISC_LOG_ERROR,
 					    "endpoint '%s' is not a "
@@ -2187,6 +2231,13 @@ check_httpserver(const cfg_obj_t *http, isc_symtab_t *symtab) {
 				if (result == ISC_R_SUCCESS) {
 					result = ISC_R_FAILURE;
 				}
+			}
+		}
+		if (empty) {
+			cfg_obj_log(eps, ISC_LOG_ERROR,
+				    "empty 'endpoints' entry");
+			if (result == ISC_R_SUCCESS) {
+				result = ISC_R_FAILURE;
 			}
 		}
 	}
@@ -2223,8 +2274,8 @@ done:
 #endif /* HAVE_LIBNGHTTP2 */
 
 static isc_result_t
-check_tls_defintion(const cfg_obj_t *tlsobj, const char *name,
-		    isc_symtab_t *symtab) {
+check_tls_definition(const cfg_obj_t *tlsobj, const char *name,
+		     isc_symtab_t *symtab) {
 	isc_result_t result = ISC_R_SUCCESS, tresult;
 	const cfg_obj_t *tls_proto_list = NULL, *tls_key = NULL,
 			*tls_cert = NULL, *tls_ciphers = NULL,
@@ -2372,7 +2423,7 @@ check_tls_definitions(const cfg_obj_t *config, isc_mem_t *mctx) {
 		const char *name;
 		obj = cfg_listelt_value(elt);
 		name = cfg_obj_asstring(cfg_map_getname(obj));
-		tresult = check_tls_defintion(obj, name, symtab);
+		tresult = check_tls_definition(obj, name, symtab);
 		if (result == ISC_R_SUCCESS) {
 			result = tresult;
 		}
@@ -2480,9 +2531,8 @@ validate_remotes_key(const cfg_obj_t *voptions, const cfg_obj_t *config,
 		if (result != ISC_R_SUCCESS) {
 			cfg_obj_log(key, ISC_LOG_ERROR,
 				    "'%s' is not a valid name", str);
-		}
-
-		if (!lookup_key(voptions, nm)) {
+			result = ISC_R_FAILURE;
+		} else if (!lookup_key(voptions, nm)) {
 			if (!lookup_key(config, nm)) {
 				cfg_obj_log(key, ISC_LOG_ERROR,
 					    "key '%s' is not defined",
@@ -2697,7 +2747,7 @@ check_update_policy(const cfg_obj_t *policy) {
 		case dns_ssumatchtype_selfwild:
 			if (tresult == ISC_R_SUCCESS &&
 			    (!dns_name_equal(id, name) &&
-			     !dns_name_equal(dns_rootname, name)))
+			     !dns_name_isroot(name)))
 			{
 				cfg_obj_log(identity, ISC_LOG_ERROR,
 					    "identity and name fields are not "
@@ -2711,8 +2761,7 @@ check_update_policy(const cfg_obj_t *policy) {
 		case dns_ssumatchtype_selfsubms:
 		case dns_ssumatchtype_tcpself:
 		case dns_ssumatchtype_6to4self:
-			if (tresult == ISC_R_SUCCESS &&
-			    !dns_name_equal(dns_rootname, name))
+			if (tresult == ISC_R_SUCCESS && !dns_name_isroot(name))
 			{
 				cfg_obj_log(identity, ISC_LOG_ERROR,
 					    "name field not set to "
@@ -2869,12 +2918,16 @@ check_mirror_zone_notify(const cfg_obj_t *zoptions, const char *znamestr) {
  */
 static bool
 check_recursion(const cfg_obj_t *config, const cfg_obj_t *voptions,
-		const cfg_obj_t *goptions, cfg_aclconfctx_t *aclctx,
-		isc_mem_t *mctx) {
+		dns_rdataclass_t vclass, const cfg_obj_t *goptions,
+		cfg_aclconfctx_t *aclctx, isc_mem_t *mctx) {
 	dns_acl_t *acl = NULL;
 	const cfg_obj_t *obj;
 	isc_result_t result = ISC_R_SUCCESS;
 	bool retval = true;
+
+	if (vclass != dns_rdataclass_in) {
+		return false;
+	}
 
 	/*
 	 * Check the "recursion" option first.
@@ -3277,8 +3330,6 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 	dns_name_t *zname = NULL; /* NULL if parsing of zone name fails. */
 	isc_buffer_t b;
 	bool root = false;
-	bool rfc1918 = false;
-	bool ula = false;
 	bool dlz;
 	bool ddns = false;
 	bool has_dnssecpolicy = false;
@@ -3408,8 +3459,8 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 	dns_fixedname_init(&fixedname);
 	isc_buffer_constinit(&b, znamestr, strlen(znamestr));
 	isc_buffer_add(&b, strlen(znamestr));
-	tresult = dns_name_fromtext(dns_fixedname_name(&fixedname), &b,
-				    dns_rootname, DNS_NAME_DOWNCASE);
+	tresult = dns_name_fromtext(dns_name(&fixedname), &b, dns_rootname,
+				    DNS_NAME_DOWNCASE);
 	if (tresult != ISC_R_SUCCESS) {
 		cfg_obj_log(zconfig, ISC_LOG_ERROR,
 			    "zone '%s': is not a valid name", znamestr);
@@ -3422,7 +3473,7 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 		size_t len = 0;
 		int n;
 
-		zname = dns_fixedname_name(&fixedname);
+		zname = dns_name(&fixedname);
 		dns_name_format(zname, namebuf, sizeof(namebuf));
 		dns_rdataclass_format(zclass, classbuf, sizeof(classbuf));
 
@@ -3437,12 +3488,8 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 		if (tresult != ISC_R_SUCCESS) {
 			result = tresult;
 		}
-		if (dns_name_equal(zname, dns_rootname)) {
+		if (dns_name_isroot(zname)) {
 			root = true;
-		} else if (dns_name_isrfc1918(zname)) {
-			rfc1918 = true;
-		} else if (dns_name_isula(zname)) {
-			ula = true;
 		}
 		vname = (ztype == CFG_ZONE_INVIEW) ? target
 			: (viewname != NULL)	   ? viewname
@@ -3519,6 +3566,9 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 	 * Check if value is zero.
 	 */
 	if (check_nonzero(zoptions) != ISC_R_SUCCESS) {
+		result = ISC_R_FAILURE;
+	}
+	if (toptions != NULL && check_nonzero(toptions) != ISC_R_SUCCESS) {
 		result = ISC_R_FAILURE;
 	}
 
@@ -3751,7 +3801,7 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 	 */
 	if (ztype == CFG_ZONE_SECONDARY || ztype == CFG_ZONE_STUB ||
 	    (ztype == CFG_ZONE_MIRROR && zname != NULL &&
-	     !dns_name_equal(zname, dns_rootname)))
+	     !dns_name_isroot(zname)))
 	{
 		obj = NULL;
 		(void)get_zoneopt(zoptions, toptions, NULL, NULL, "primaries",
@@ -3827,7 +3877,7 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 	 * contradicts the purpose of the former.
 	 */
 	if (ztype == CFG_ZONE_MIRROR &&
-	    !check_recursion(config, voptions, goptions, aclctx, mctx))
+	    !check_recursion(config, voptions, zclass, goptions, aclctx, mctx))
 	{
 		cfg_obj_log(zoptions, ISC_LOG_ERROR,
 			    "zone '%s': mirror zones cannot be used if "
@@ -3896,7 +3946,7 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 		if (obj != NULL) {
 			inline_signing = signing = cfg_obj_asboolean(obj);
 		} else if (has_dnssecpolicy) {
-			signing = kasp_inlinesigning;
+			inline_signing = signing = kasp_inlinesigning;
 		}
 
 		if (has_dnssecpolicy) {
@@ -3959,7 +4009,9 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 	 * Check that a RFC 1918 / ULA reverse zone is not forward first
 	 * unless explicitly configured to be so.
 	 */
-	if (ztype == CFG_ZONE_FORWARD && (rfc1918 || ula)) {
+	if (ztype == CFG_ZONE_FORWARD && zname != NULL &&
+	    (dns_name_isrfc1918(zname) || dns_name_isula(zname)))
+	{
 		obj = NULL;
 		(void)get_zoneopt(zoptions, toptions, NULL, NULL, "forward",
 				  &obj);
@@ -3977,7 +4029,8 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 					    "inherited 'forward first;' for "
 					    "%s zone '%s' - did you want "
 					    "'forward only;'?",
-					    rfc1918 ? "rfc1918" : "ula",
+					    dns_name_isula(zname) ? "ula"
+								  : "rfc1918",
 					    znamestr);
 			}
 		}
@@ -4127,7 +4180,7 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 		(void)get_zoneopt(zoptions, toptions, NULL, NULL,
 				  "log-report-channel", &obj);
 		if (obj != NULL && cfg_obj_asboolean(obj) &&
-		    dns_name_equal(zname, dns_rootname))
+		    dns_name_isroot(zname))
 		{
 			cfg_obj_log(zconfig, ISC_LOG_ERROR,
 				    "'log-report-channel' cannot be set in "
@@ -4168,8 +4221,9 @@ isccfg_check_zoneconf(const cfg_obj_t *zconfig, const cfg_obj_t *voptions,
 		if (result == ISC_R_SUCCESS) {
 			result = ISC_R_FAILURE;
 		}
-	} else if (!dlz && (obj == NULL ||
-			    strcmp(ZONEDB_DEFAULT, cfg_obj_asstring(obj)) == 0))
+	} else if (zname != NULL && !dlz &&
+		   (obj == NULL ||
+		    strcmp(ZONEDB_DEFAULT, cfg_obj_asstring(obj)) == 0))
 	{
 		const cfg_obj_t *fileobj = NULL;
 		(void)get_zoneopt(zoptions, toptions, NULL, NULL, "file",
@@ -4860,6 +4914,7 @@ check_servers(const cfg_obj_t *config, const cfg_obj_t *voptions,
 #define ROOT_KSK_ANY	 0x03
 #define ROOT_KSK_2010	 0x04
 #define ROOT_KSK_2017	 0x08
+#define ROOT_KSK_2026	 0x10
 
 static isc_result_t
 check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
@@ -4872,7 +4927,7 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 	isc_result_t result = ISC_R_SUCCESS;
 	isc_result_t tresult;
 	uint32_t rdata1, rdata2, rdata3;
-	unsigned char data[4096];
+	unsigned char data[DNS_RDATA_MAXLENGTH];
 	const char *atstr = NULL;
 	enum {
 		INIT_DNSKEY,
@@ -4942,6 +4997,34 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 		0xca, 0x51, 0x9a, 0xf2, 0xcb, 0x9b, 0x5f, 0x63, 0x67, 0xe9,
 		0x4c, 0x0d, 0x47, 0x50, 0x24, 0x51, 0x35, 0x7b, 0xe1, 0xb5
 	};
+	static const unsigned char root_ksk_2026[] = {
+		0x03, 0x01, 0x00, 0x01, 0xaf, 0x7a, 0x8d, 0xeb, 0xa4, 0x9d,
+		0x99, 0x5a, 0x79, 0x2a, 0xef, 0xc8, 0x02, 0x63, 0xe9, 0x91,
+		0xef, 0xdb, 0xc8, 0x61, 0x38, 0xa9, 0x31, 0xde, 0xb2, 0xc6,
+		0x5d, 0x56, 0x82, 0xea, 0xb5, 0xd3, 0xb0, 0x37, 0x38, 0xe3,
+		0xdf, 0xdc, 0x89, 0xd9, 0x6d, 0xa6, 0x4c, 0x86, 0xc0, 0x22,
+		0x4d, 0x9c, 0xe0, 0x25, 0x14, 0xd2, 0x85, 0xda, 0x30, 0x68,
+		0xb1, 0x90, 0x54, 0xe5, 0xe7, 0x87, 0xb2, 0x96, 0x90, 0x58,
+		0xe9, 0x8e, 0x12, 0x56, 0x6c, 0x8c, 0x80, 0x8c, 0x40, 0xc0,
+		0xb7, 0x69, 0xe1, 0xdb, 0x1a, 0x24, 0xa1, 0xbd, 0x9b, 0x31,
+		0xe3, 0x03, 0x18, 0x4a, 0x31, 0xfc, 0x7b, 0xb5, 0x6b, 0x85,
+		0xbb, 0xba, 0x8a, 0xbc, 0x02, 0xcd, 0x50, 0x40, 0xa4, 0x44,
+		0xa3, 0x6d, 0x47, 0x69, 0x59, 0x69, 0x84, 0x9e, 0x16, 0xad,
+		0x85, 0x6b, 0xb5, 0x8e, 0x8f, 0xac, 0x88, 0x55, 0x22, 0x44,
+		0x00, 0x31, 0x9b, 0xda, 0xb2, 0x24, 0xd8, 0x3f, 0xc0, 0xe6,
+		0x6a, 0xab, 0x32, 0xff, 0x74, 0xbf, 0xea, 0xf0, 0xf9, 0x1c,
+		0x45, 0x4e, 0x68, 0x50, 0xa1, 0x29, 0x52, 0x07, 0xbb, 0xd4,
+		0xcd, 0xde, 0x8f, 0x6f, 0xfb, 0x08, 0xfa, 0xa9, 0x75, 0x5c,
+		0x2e, 0x32, 0x84, 0xef, 0xa0, 0x1f, 0x99, 0x39, 0x3e, 0x18,
+		0x78, 0x6c, 0xb1, 0x32, 0xf1, 0xe6, 0x6e, 0xbc, 0x65, 0x17,
+		0x31, 0x8e, 0x1c, 0xe8, 0xa3, 0xb7, 0x33, 0x7e, 0xbb, 0x54,
+		0xd0, 0x35, 0xab, 0x57, 0xd9, 0x70, 0x6e, 0xcd, 0x93, 0x50,
+		0xd4, 0xaf, 0xac, 0xd8, 0x25, 0xe4, 0x3c, 0x86, 0x68, 0xee,
+		0xce, 0x89, 0x81, 0x9c, 0xaf, 0x68, 0x17, 0xaf, 0x62, 0xdc,
+		0x4f, 0xbd, 0x82, 0xf0, 0xe3, 0x3f, 0x66, 0x47, 0xb2, 0xb6,
+		0xbd, 0xa1, 0x75, 0xf1, 0x46, 0x07, 0xf5, 0x9f, 0x46, 0x35,
+		0x45, 0x1e, 0x6b, 0x27, 0xdf, 0x28, 0x2e, 0xf7, 0x3d, 0x87
+	};
 	static const unsigned char root_ds_1_2017[] = {
 		0xae, 0x1e, 0xa5, 0xb9, 0x74, 0xd4, 0xc8, 0x58, 0xb7, 0x40,
 		0xbd, 0x03, 0xe3, 0xce, 0xd7, 0xeb, 0xfc, 0xbd, 0x17, 0x24
@@ -4951,6 +5034,12 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 		0xa9, 0x5c, 0x0b, 0x0d, 0x7c, 0x65, 0xd0, 0x84,
 		0x58, 0xe8, 0x80, 0x40, 0x9b, 0xbc, 0x68, 0x34,
 		0x57, 0x10, 0x42, 0x37, 0xc7, 0xf8, 0xec, 0x8D
+	};
+	static const unsigned char root_ds_2_2026[] = {
+		0x68, 0x3D, 0x2D, 0x0A, 0xCB, 0x8C, 0x9B, 0x71,
+		0x2A, 0x19, 0x48, 0xB2, 0x7F, 0x74, 0x12, 0x19,
+		0x29, 0x8D, 0x0A, 0x45, 0x0D, 0x61, 0x2C, 0x48,
+		0x3A, 0xF4, 0x44, 0xA4, 0xC0, 0xFB, 0x2B, 0x16
 	};
 
 	/* if DNSKEY, flags; if DS, key tag */
@@ -5042,9 +5131,7 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 			}
 		}
 
-		if (result == ISC_R_SUCCESS &&
-		    dns_name_equal(keyname, dns_rootname))
-		{
+		if (result == ISC_R_SUCCESS && dns_name_isroot(keyname)) {
 			/*
 			 * Flag any use of a root key, regardless of content.
 			 */
@@ -5067,6 +5154,14 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 				   sizeof(root_ksk_2017)) == 0)
 			{
 				*flagsp |= ROOT_KSK_2017;
+			}
+			if (rdata1 == 257 && rdata2 == 3 && rdata3 == 8 &&
+			    (isc_buffer_usedlength(&b) ==
+			     sizeof(root_ksk_2026)) &&
+			    memcmp(data, root_ksk_2026,
+				   sizeof(root_ksk_2026)) == 0)
+			{
+				*flagsp |= ROOT_KSK_2026;
 			}
 		}
 		break;
@@ -5099,9 +5194,7 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 				    isc_result_totext(tresult));
 			result = ISC_R_FAILURE;
 		}
-		if (result == ISC_R_SUCCESS &&
-		    dns_name_equal(keyname, dns_rootname))
-		{
+		if (result == ISC_R_SUCCESS && dns_name_isroot(keyname)) {
 			/*
 			 * Flag any use of a root key, regardless of content.
 			 */
@@ -5124,6 +5217,15 @@ check_trust_anchor(const cfg_obj_t *key, unsigned int *flagsp) {
 				   sizeof(root_ds_2_2017)) == 0)
 			{
 				*flagsp |= ROOT_KSK_2017;
+			}
+
+			if (rdata1 == 38696 && rdata2 == 8 && rdata3 == 2 &&
+			    (isc_buffer_usedlength(&b) ==
+			     sizeof(root_ds_2_2026)) &&
+			    memcmp(data, root_ds_2_2026,
+				   sizeof(root_ds_2_2026)) == 0)
+			{
+				*flagsp |= ROOT_KSK_2026;
 			}
 		}
 		break;
@@ -5184,7 +5286,7 @@ record_static_keys(isc_symtab_t *symtab, isc_mem_t *mctx,
 			isc_mem_free(mctx, p);
 		}
 
-		if (autovalidation && dns_name_equal(name, dns_rootname)) {
+		if (autovalidation && dns_name_isroot(name)) {
 			cfg_obj_log(obj, ISC_LOG_ERROR,
 				    "static trust anchor for root zone "
 				    "cannot be used with "
@@ -5646,6 +5748,17 @@ check_viewconf(const cfg_obj_t *config, const cfg_obj_t *voptions,
 
 	cfg_aclconfctx_create(mctx, &aclctx);
 
+	if (vclass != dns_rdataclass_in) {
+		if (check_recursion(config, voptions, dns_rdataclass_in,
+				    options, aclctx, mctx))
+		{
+			cfg_obj_log(opts, ISC_LOG_WARNING,
+				    "recursion will be disabled for "
+				    "non-IN view '%s'",
+				    viewname);
+		}
+	}
+
 	if (voptions != NULL) {
 		(void)cfg_map_get(voptions, "zone", &zones);
 	} else {
@@ -5822,7 +5935,10 @@ check_viewconf(const cfg_obj_t *config, const cfg_obj_t *voptions,
 				}
 			}
 
-			if ((taflags & ROOT_KSK_STATIC) != 0) {
+			if (((taflags & ROOT_KSK_2017) != 0 ||
+			     (taflags & ROOT_KSK_2026) != 0) &&
+			    (taflags & ROOT_KSK_STATIC) != 0)
+			{
 				cfg_obj_log(check_keys[i], ISC_LOG_WARNING,
 					    "static entry for the root "
 					    "zone WILL FAIL after key "
@@ -5838,6 +5954,40 @@ check_viewconf(const cfg_obj_t *config, const cfg_obj_t *voptions,
 					    "initial-key entry for the root "
 					    "zone uses the 2010 key without "
 					    "the updated 2017 key");
+			}
+
+			if ((taflags & ROOT_KSK_2010) != 0 &&
+			    (taflags & ROOT_KSK_2026) == 0)
+			{
+				cfg_obj_log(check_keys[i], ISC_LOG_WARNING,
+					    "initial-key entry for the root "
+					    "zone uses the 2010 key without "
+					    "the updated 2026 key");
+			}
+
+			if ((taflags & ROOT_KSK_2017) != 0 &&
+			    (taflags & ROOT_KSK_2026) == 0)
+			{
+				cfg_obj_log(check_keys[i], ISC_LOG_WARNING,
+					    "initial-key entry for the root "
+					    "zone uses the 2017 key without "
+					    "the updated 2026 key");
+			}
+
+			/*
+			 * Warn about missing 2017 trust anchor until
+			 * 23:59 October 11 2026 UTC.  After this the IANA root
+			 * zone is expected to be signed signed with the 2026
+			 * key.
+			 */
+			if (time(NULL) < 1791763140 &&
+			    (taflags & ROOT_KSK_2017) == 0 &&
+			    (taflags & ROOT_KSK_2026) != 0)
+			{
+				cfg_obj_log(check_keys[i], ISC_LOG_WARNING,
+					    "initial-key entry for the root "
+					    "zone uses the updated 2026 key "
+					    "without the 2017 key");
 			}
 
 			dflags |= taflags;
@@ -6285,6 +6435,18 @@ isccfg_check_namedconf(const cfg_obj_t *config, unsigned int flags,
 			}
 		}
 		symtype = vclass + 1;
+		/*
+		 * Only the Internet (IN) class is allowed for user-defined
+		 * views.  The builtin "_bind" view (Chaos) is generated
+		 * internally and never appears in the configuration here.
+		 */
+		if (tresult == ISC_R_SUCCESS && vclass != dns_rdataclass_in) {
+			cfg_obj_log(view, ISC_LOG_ERROR,
+				    "view '%s': only Internet (IN) class is "
+				    "allowed",
+				    key);
+			tresult = ISC_R_FAILURE;
+		}
 		if (tresult == ISC_R_SUCCESS && symtab != NULL) {
 			symvalue.as_cpointer = view;
 			tresult = isc_symtab_define(symtab, key, symtype,

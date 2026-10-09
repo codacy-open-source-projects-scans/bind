@@ -153,7 +153,11 @@ fromwire_in_srv(ARGS_FROMWIRE) {
 	UNUSED(type);
 	UNUSED(rdclass);
 
-	dctx = dns_decompress_setpermitted(dctx, false);
+	/*
+	 * RFC 3597 section 4 asks receivers to decompress this type,
+	 * even though senders must not compress it.
+	 */
+	dctx = dns_decompress_setpermitted(dctx, true);
 
 	dns_name_init(&name);
 
@@ -282,25 +286,8 @@ tostruct_in_srv(ARGS_TOSTRUCT) {
 	isc_region_consume(&region, 2);
 	dns_name_fromregion(&name, &region);
 	dns_name_init(&srv->target);
-	name_duporclone(&name, mctx, &srv->target);
-	srv->mctx = mctx;
+	dns_name_clone(&name, &srv->target);
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_in_srv(ARGS_FREESTRUCT) {
-	dns_rdata_in_srv_t *srv = source;
-
-	REQUIRE(srv != NULL);
-	REQUIRE(srv->common.rdclass == dns_rdataclass_in);
-	REQUIRE(srv->common.rdtype == dns_rdatatype_srv);
-
-	if (srv->mctx == NULL) {
-		return;
-	}
-
-	dns_name_free(&srv->target, srv->mctx);
-	srv->mctx = NULL;
 }
 
 static isc_result_t
@@ -324,7 +311,7 @@ additionaldata_in_srv(ARGS_ADDLDATA) {
 	isc_region_consume(&region, 2);
 	dns_name_fromregion(&name, &region);
 
-	if (dns_name_equal(&name, dns_rootname)) {
+	if (dns_name_isroot(&name)) {
 		return ISC_R_SUCCESS;
 	}
 
@@ -332,19 +319,18 @@ additionaldata_in_srv(ARGS_ADDLDATA) {
 
 	dns_fixedname_init(&fixed);
 	snprintf(buf, sizeof(buf), "_%u._tcp", port);
-	result = dns_name_fromstring(dns_fixedname_name(&fixed), buf, NULL, 0,
-				     NULL);
+	result = dns_name_fromstring(dns_name(&fixed), buf, NULL, 0, NULL);
 	if (result != ISC_R_SUCCESS) {
 		return ISC_R_SUCCESS;
 	}
 
-	result = dns_name_concatenate(dns_fixedname_name(&fixed), &name,
-				      dns_fixedname_name(&fixed));
+	result = dns_name_concatenate(dns_name(&fixed), &name,
+				      dns_name(&fixed));
 	if (result != ISC_R_SUCCESS) {
 		return ISC_R_SUCCESS;
 	}
 
-	return (add)(arg, dns_fixedname_name(&fixed), dns_rdatatype_tlsa,
+	return (add)(arg, dns_name(&fixed), dns_rdatatype_tlsa,
 		     NULL DNS__DB_FILELINE);
 }
 

@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from itertools import count
 from time import sleep
 
 import os
@@ -19,13 +20,14 @@ import dns.message
 
 import isctest
 
-# ISO datetime format without msec
-FMT = "%Y-%m-%dT%H:%M:%SZ"
+# ISO datetime format without msec (the %z directive parses the trailing "Z"
+# as UTC, yielding timezone-aware datetimes)
+FMT = "%Y-%m-%dT%H:%M:%S%z"
 
 # The constants were taken from BIND 9 source code (lib/dns/zone.c)
 max_refresh = timedelta(seconds=2419200)  # 4 weeks
 max_expires = timedelta(seconds=14515200)  # 24 weeks
-dayzero = datetime.utcfromtimestamp(0).replace(microsecond=0)
+dayzero = datetime.fromtimestamp(0, timezone.utc).replace(microsecond=0)
 
 # Wait for the secondary zone files to appear to extract their mtime
 MAX_SECONDARY_ZONE_WAITTIME_SEC = 5
@@ -49,7 +51,7 @@ def check_loaded(loaded, expected, now):
 
 
 def check_zone_timers(loaded, expires, refresh, loaded_exp):
-    now = datetime.utcnow().replace(microsecond=0)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
     # Sanity checks the zone timers values
     if expires is not None:
         check_expires(expires, now, now + max_expires)
@@ -58,9 +60,10 @@ def check_zone_timers(loaded, expires, refresh, loaded_exp):
     check_loaded(loaded, loaded_exp, now)
 
 
-def check_rtt(rtt, rtt_expected):
-    for val in rtt_expected:
-        assert rtt[val[0]] == val[1]
+def check_rtt(rtt_before, rtt_after, rtt_expected):
+    for bucket, expected in rtt_expected:
+        delta = rtt_after.get(bucket, 0) - rtt_before.get(bucket, 0)
+        assert delta == expected, f"bucket {bucket}: {delta} != {expected}"
 
 
 #
@@ -77,7 +80,7 @@ def zone_mtime(zonedir, name):
     except FileNotFoundError:
         return dayzero
 
-    mtime = datetime.utcfromtimestamp(si.st_mtime).replace(microsecond=0)
+    mtime = datetime.fromtimestamp(si.st_mtime, timezone.utc).replace(microsecond=0)
 
     return mtime
 
@@ -188,6 +191,16 @@ def check_traffic(data, expected):
     assert ordered_data == ordered_expected
 
 
+def wait_for_traffic(fetch_traffic, statsip, statsport, expected):
+    # named updates the counters asynchronously, so a snapshot taken right
+    # after the query may lag; re-fetch until it matches (or time out).
+    def fetch_and_check():
+        check_traffic(fetch_traffic(statsip, statsport), expected)
+        return True
+
+    isctest.run.retry_with_timeout(fetch_and_check, timeout=10)
+
+
 def test_traffic(fetch_traffic, **kwargs):
     statsip = kwargs["statsip"]
     statsport = kwargs["statsport"]
@@ -200,41 +213,46 @@ def test_traffic(fetch_traffic, **kwargs):
     ans = isctest.query.udp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
     update_expected(exp, "dns-udp-responses-sizes-sent-ipv4", ans)
-    data = fetch_traffic(statsip, statsport)
-
-    check_traffic(data, exp)
+    wait_for_traffic(fetch_traffic, statsip, statsport, exp)
 
     msg = create_msg("long.example.", "TXT")
     update_expected(exp, "dns-udp-requests-sizes-received-ipv4", msg)
     ans = isctest.query.udp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
     update_expected(exp, "dns-udp-responses-sizes-sent-ipv4", ans)
-    data = fetch_traffic(statsip, statsport)
-
-    check_traffic(data, exp)
+    wait_for_traffic(fetch_traffic, statsip, statsport, exp)
 
     msg = create_msg("short.example.", "TXT")
     update_expected(exp, "dns-tcp-requests-sizes-received-ipv4", msg)
     ans = isctest.query.tcp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
     update_expected(exp, "dns-tcp-responses-sizes-sent-ipv4", ans)
-    data = fetch_traffic(statsip, statsport)
-
-    check_traffic(data, exp)
+    wait_for_traffic(fetch_traffic, statsip, statsport, exp)
 
     msg = create_msg("long.example.", "TXT")
     update_expected(exp, "dns-tcp-requests-sizes-received-ipv4", msg)
     ans = isctest.query.tcp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
     update_expected(exp, "dns-tcp-responses-sizes-sent-ipv4", ans)
-    data = fetch_traffic(statsip, statsport)
+    wait_for_traffic(fetch_traffic, statsip, statsport, exp)
 
-    check_traffic(data, exp)
+
+# Each test_rtt attempt gets a fresh label so that its latency queries are
+# never answered from the resolver cache (a flaky retry reuses the same
+# named instance).
+_RTT_RUN_IDS = count()
 
 
 def test_rtt(fetch_views, **kwargs):
     statsip = kwargs["statsip"]
     statsport = kwargs["statsport"]
+
+    # The histograms accumulate for the lifetime of named, so check the
+    # change of the counters rather than their absolute values to allow
+    # re-running the test against the same instance (e.g. a flaky retry).
+    before = fetch_views(statsip, statsport)
+
+    runid = f"run{next(_RTT_RUN_IDS)}"
 
     # auth query, 0 delay is expected, only for "in"
     msg = create_msg("a.example2.", "TXT")
@@ -242,21 +260,29 @@ def test_rtt(fetch_views, **kwargs):
     isctest.check.noerror(ans)
 
     # resolver query with a 530ms delay for both "in" and "out"
-    msg = create_msg("530.latency.example2.", "A")
+    msg = create_msg(f"530.{runid}.latency.example2.", "A")
     ans = isctest.query.tcp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
 
     # resolver query with a 540ms delay for both "in" and "out"
-    msg = create_msg("540.latency.example2.", "A")
+    msg = create_msg(f"540.{runid}.latency.example2.", "A")
     ans = isctest.query.tcp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
 
     # resolver query with a 730ms delay for both "in" and "out"
-    msg = create_msg("730.latency.example2.", "A")
+    msg = create_msg(f"730.{runid}.latency.example2.", "A")
     ans = isctest.query.tcp(msg, statsip, attempts=1)
     isctest.check.noerror(ans)
 
-    data = fetch_views(statsip, statsport)
+    after = fetch_views(statsip, statsport)
 
-    check_rtt(data["in-queries-rtt"], [["~0", 1], ["512-575", 2], ["704-767", 1]])
-    check_rtt(data["out-queries-rtt"], [["512-575", 2], ["704-767", 1]])
+    check_rtt(
+        before["in-queries-rtt"],
+        after["in-queries-rtt"],
+        [["~0", 1], ["512-575", 2], ["704-767", 1]],
+    )
+    check_rtt(
+        before["out-queries-rtt"],
+        after["out-queries-rtt"],
+        [["512-575", 2], ["704-767", 1]],
+    )

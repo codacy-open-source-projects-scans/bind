@@ -98,11 +98,16 @@ dns_nsec_isset(const unsigned char *array, unsigned int type);
  * Test if the corresponding 'type' bit is set in 'array'.
  */
 
+#define dns_nsec_noexistnodata(type, name, nsecname, nsecset, exists, data,  \
+			       wild, log, arg)                               \
+	dns__nsec_noexistnodata(type, DNS_NAME__RO_ARG(name),                \
+				DNS_NAME__RO_ARG(nsecname), nsecset, exists, \
+				data, wild, log, arg)
 isc_result_t
-dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
-		       const dns_name_t *nsecname, dns_rdataset_t *nsecset,
-		       bool *exists, bool *data, dns_name_t *wild,
-		       dns_nseclog_t log, void *arg);
+dns__nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
+			const dns_name_t *nsecname, dns_rdataset_t *nsecset,
+			bool *exists, bool *data, dns_name_t *wild,
+			dns_nseclog_t log, void *arg);
 /*%
  * Return ISC_R_SUCCESS if we can determine that the name doesn't exist
  * or we can determine whether there is data or not at the name.
@@ -115,11 +120,19 @@ dns_nsec_noexistnodata(dns_rdatatype_t type, const dns_name_t *name,
  */
 
 bool
-dns_nsec_requiredtypespresent(dns_rdataset_t *rdataset);
-/*
- * Return true if all the NSEC records in rdataset have both
- * NSEC and RRSIG present.
+dns_nsec_is_legal(dns_rdataset_t *rdataset, const dns_name_t *name);
+/**<
+ * \brief
+ * Validates a rdataset of type NSEC.
  *
- * Requires:
+ * This functions checks for the following in the given rdataset:
+ * \li All NSEC records have both NSEC and RRSIG present
+ * \li All NSEC entries are under the `name`
+ *
+ * \par Requires:
  * \li	rdataset to be a NSEC rdataset.
+ * \li  `name` is a valid dns_name_t
+ *
+ * \retval true if all the checks pass
+ * \retval false otherwise
  */

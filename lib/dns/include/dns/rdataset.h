@@ -50,6 +50,7 @@
 #include <isc/magic.h>
 #include <isc/stdtime.h>
 
+#include <dns/name.h>
 #include <dns/rdataslab.h>
 #include <dns/rdatastruct.h>
 #include <dns/rdatavec.h>
@@ -72,12 +73,10 @@ struct dns_rdatasetmethods {
 	void (*clone)(const dns_rdataset_t  *source,
 		      dns_rdataset_t *target DNS__DB_FLARG);
 	unsigned int (*count)(dns_rdataset_t *rdataset);
-	isc_result_t (*addnoqname)(dns_rdataset_t *rdataset, dns_name_t *name);
+	isc_result_t (*addnoqname)(dns_rdataset_t   *rdataset,
+				   dns_linkedname_t *name,
+				   dns_rdatatype_t   type);
 	isc_result_t (*getnoqname)(dns_rdataset_t *rdataset, dns_name_t *name,
-				   dns_rdataset_t	 *neg,
-				   dns_rdataset_t *negsig DNS__DB_FLARG);
-	isc_result_t (*addclosest)(dns_rdataset_t *rdataset, dns_name_t *name);
-	isc_result_t (*getclosest)(dns_rdataset_t *rdataset, dns_name_t *name,
 				   dns_rdataset_t	 *neg,
 				   dns_rdataset_t *negsig DNS__DB_FLARG);
 	void (*settrust)(dns_rdataset_t *rdataset, dns_trust_t trust);
@@ -133,7 +132,6 @@ struct dns_rdataset {
 		bool	       checknames   : 1; /*%< Used by resolver. */
 		bool	       required	    : 1;
 		bool	       resign	    : 1;
-		bool	       closest	    : 1;
 		bool	       optout	    : 1; /*%< OPTOUT proof */
 		bool	       negative	    : 1;
 		bool	       prefetch	    : 1;
@@ -188,24 +186,39 @@ struct dns_rdataset {
 		 * a QP database, 'raw' will generally point to the
 		 * memory immediately following a slabheader. (There
 		 * is an exception in the case of rdatasets returned by
-		 * the `getnoqname` and `getclosest` methods; see
-		 * comments in rdataslab.c for details.)
+		 * the `getnoqname` method; see comments in
+		 * rdataslab.c for details.)
 		 */
 		struct {
-			struct dns_db	       *db;
 			dns_dbnode_t	       *node;
 			unsigned char	       *raw;
 			unsigned char	       *iter_pos;
 			unsigned int		iter_count;
-			dns_slabheader_proof_t *noqname, *closest;
+			dns_slabheader_proof_t *noqname;
 		} slab;
+
+		/*
+		 * A slab rdataset provides access to an rdataslab. In
+		 * a QP database, 'raw' will generally point to the
+		 * memory immediately following a slabheader. (There
+		 * is an exception in the case of rdatasets returned by
+		 * the `getnoqname` and `getclosest` methods; see
+		 * comments in rdataslab.c for details.)
+		 */
+		struct {
+			dns_dbnode_t	 *node;
+			dns_slabheader_t *header;
+			unsigned char	 *raw;
+			unsigned char	 *iter_pos;
+			unsigned int	  iter_count;
+		} proof;
 
 		/*
 		 * A vec rdataset provides access to an rdatavec. In
 		 * a QP database, 'header' points to the vecheader
 		 * structure. (There is an exception in the case of
-		 * rdatasets returned by the `getnoqname` and `getclosest`
-		 * methods; see comments in rdatavec.c for details.)
+		 * rdatasets returned by the `getnoqname` method;
+		 * see comments in rdatavec.c for details.)
 		 */
 		struct {
 			dns_vecheader_t *header;
@@ -221,11 +234,13 @@ struct dns_rdataset {
 			struct dns_rdata     *iter;
 
 			/*
-			 * These refer to names passed in by the caller of
-			 * dns_rdataset_addnoqname() and _addclosest()
+			 * Refers to the name passed in by the caller of
+			 * dns_rdataset_addnoqname(), and the denial type
+			 * (NSEC or NSEC3) of the proof selected there.
 			 */
-			struct dns_name *noqname, *closest;
-			dns_dbnode_t	*node;
+			struct dns_linkedname *noqname;
+			dns_rdatatype_t	       noqnametype;
+			dns_dbnode_t	      *node;
 		} rdlist;
 	};
 };
@@ -478,11 +493,14 @@ dns_rdataset_towire(dns_rdataset_t *rdataset, const dns_name_t *owner_name,
  *	dns_name_towire().
  */
 
+#define dns_rdataset_additionaldata(rdataset, owner_name, add, arg, limit)   \
+	dns__rdataset_additionaldata(rdataset, DNS_NAME__RO_ARG(owner_name), \
+				     add, arg, limit)
 isc_result_t
-dns_rdataset_additionaldata(dns_rdataset_t	    *rdataset,
-			    const dns_name_t	    *owner_name,
-			    dns_additionaldatafunc_t add, void *arg,
-			    size_t limit);
+dns__rdataset_additionaldata(dns_rdataset_t	     *rdataset,
+			     const dns_name_t	     *owner_name,
+			     dns_additionaldatafunc_t add, void *arg,
+			     size_t limit);
 /*%<
  * For each rdata in rdataset, call 'add' for each name and type in the
  * rdata which is subject to additional section processing.
@@ -529,45 +547,26 @@ dns__rdataset_getnoqname(dns_rdataset_t *rdataset, dns_name_t *name,
  */
 
 isc_result_t
-dns_rdataset_addnoqname(dns_rdataset_t *rdataset, dns_name_t *name);
+dns_rdataset_addnoqname(dns_rdataset_t *rdataset, dns_linkedname_t *name,
+			dns_rdatatype_t type);
 /*%<
- * Associate a noqname proof with this record.
+ * Associate a noqname proof with this record: the rdataset of 'type'
+ * (NSEC or NSEC3) at 'name' together with the RRSIG rdataset covering it.
  * Sets 'noqname' attribute if successful.
  * Adjusts the 'rdataset->ttl' to minimum of the 'rdataset->ttl' and
  * the 'nsec'/'nsec3' and 'rrsig(nsec)'/'rrsig(nsec3)' ttl.
  *
  * Requires:
- *\li	'rdataset' to be valid and 'noqname' attribute to be set.
- *\li	'name' to be valid and have NSEC or NSEC3 and associated RRSIG
- *	 rdatasets.
- */
-
-#define dns_rdataset_getclosest(rdataset, name, nsec, nsecsig) \
-	dns__rdataset_getclosest(rdataset, name, nsec, nsecsig DNS__DB_FILELINE)
-isc_result_t
-dns__rdataset_getclosest(dns_rdataset_t *rdataset, dns_name_t *name,
-			 dns_rdataset_t		*nsec,
-			 dns_rdataset_t *nsecsig DNS__DB_FLARG);
-/*%<
- * Return the closest encloser for this record.
- *
- * Requires:
- *\li	'rdataset' to be valid and 'closest' attribute to be set.
+ *\li	'rdataset' to be valid.
  *\li	'name' to be valid.
- *\li	'nsec' and 'nsecsig' to be valid and not associated.
- */
-
-isc_result_t
-dns_rdataset_addclosest(dns_rdataset_t *rdataset, dns_name_t *name);
-/*%<
- * Associate a closest encloset proof with this record.
- * Sets 'closest' attribute if successful.
- * Adjusts the 'rdataset->ttl' to minimum of the 'rdataset->ttl' and
- * the 'nsec' and 'rrsig(nsec)' ttl.
+ *\li	'type' to be dns_rdatatype_nsec or dns_rdatatype_nsec3.
  *
- * Requires:
- *\li	'rdataset' to be valid and 'closest' attribute to be set.
- *\li	'name' to be valid and have NSEC3 and RRSIG(NSEC3) rdatasets.
+ * Returns:
+ *\li	#ISC_R_SUCCESS
+ *\li	#ISC_R_NOTFOUND if 'name' has no rdataset of 'type' or no RRSIG
+ *	 rdataset covering it.
+ *\li	#ISC_R_NOTIMPLEMENTED if the rdataset implementation does not
+ *	 support noqname proofs.
  */
 
 void
@@ -596,8 +595,10 @@ dns_rdataset_clearprefetch(dns_rdataset_t *rdataset);
  * It has no function in other databases.
  */
 
+#define dns_rdataset_setownercase(rdataset, name) \
+	dns__rdataset_setownercase(rdataset, DNS_NAME__RO_ARG(name))
 void
-dns_rdataset_setownercase(dns_rdataset_t *rdataset, const dns_name_t *name);
+dns__rdataset_setownercase(dns_rdataset_t *rdataset, const dns_name_t *name);
 /*%<
  * Store the casing of 'name', the owner name of 'rdataset', into
  * a bitfield so that the name can be capitalized the same when when

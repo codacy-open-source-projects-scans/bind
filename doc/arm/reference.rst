@@ -527,9 +527,8 @@ and retrieve non-DNS results from a name server.
 ``read-only``
    If the ``read-only`` argument is ``on``, the control channel is limited
    to the following set of read-only commands: ``nta -dump``, :any:`null`,
-   ``status``, ``showzone``, ``testgen``, and ``zonestatus``. By default,
-   ``read-only`` is not enabled and the control channel allows read-write
-   access.
+   ``status``, ``showzone``, and ``zonestatus``. By default, ``read-only``
+   is not enabled and the control channel allows read-write access.
 
 If no :any:`controls` statement is present, :iscman:`named` sets up a default
 control channel listening on the loopback address 127.0.0.1 and its IPv6
@@ -2631,6 +2630,14 @@ Boolean Options
    owner name indicates that it is a reverse lookup of a hostname (the
    owner name ends in IN-ADDR.ARPA, IP6.ARPA, or IP6.INT).
 
+   Owner names of A and AAAA records starting with the Active
+   Directory Forest prefix labels ``gc._msdcs`` are excluded if the
+   remainder of the name meets the check-names rules.
+
+   Owner names of A records meeting the :rfc:`7208` rules for the
+   labels ``_spf``, ``_spf_verify`` and ``_spf_rate`` are also
+   excluded.
+
 .. namedconf:statement:: check-dup-records
    :tags: dnssec, query
    :short: Checks primary zones for records that are treated as different by DNSSEC but are semantically equal in plain DNS.
@@ -3925,6 +3932,20 @@ system.
    option are expected to use TCP connections for more than one message.
    This value can be updated at runtime by using :option:`rndc tcp-timeouts`.
 
+.. namedconf:statement:: tcp-reuse-timeout
+   :tags: query
+   :short: Sets the amount of time (in milliseconds) that an idle outgoing TCP connection is kept open for reuse.
+
+   This sets the amount of time, in units of 100 milliseconds, that an idle
+   outgoing TCP or TLS connection opened by :iscman:`named` (for example, to a
+   forwarder or an authoritative server) is kept open after its last outstanding
+   response has completed, so that it can be reused by a later query instead of
+   being closed and reopened. The default is 50 (5 seconds), and the maximum is
+   1200 (two minutes). A value of 0 disables keeping idle outgoing TCP or TLS
+   connections open for reuse; it does not affect sharing of a connection while
+   queries are still outstanding. Values above the maximum are adjusted with a
+   logged warning.
+
 .. namedconf:statement:: tcp-advertised-timeout
    :tags: query
    :short: Sets the timeout value (in milliseconds) that the server sends in responses containing the EDNS TCP keepalive option.
@@ -4186,16 +4207,25 @@ Tuning
    exceed 90 seconds and is truncated to 90 seconds if set to a greater
    value.
 
+.. namedconf:statement:: min-delegation-ttl
+   :tags: server
+   :short: Configure the minimum time (in seconds) that the server caches delegations.
+
+   This sets the minimum time for which the server caches nameserver names and
+   glues for a delegation, in seconds. For convenience, TTL-style time-unit
+   suffixes may be used to specify the value. It also accepts ISO 8601 duration
+   formats.
+
+   Setting a value of ``0`` disable the minimum check TTL for delegations. The
+   default :any:`min-delegation-ttl` is ``60`` seconds.
+
 .. namedconf:statement:: max-delegation-servers
    :tags: server
-   :short: Configure the maximum number of nameserver names considered for a delegation
+   :short: Configure the maximum number of nameservers considered for a delegation
 
    When looking up remote nameservers for a delegation, the list of nameserver
    names is sorted according to Canonical RR Ordering within an RRset (see
-   :rfc:`4034` Section 6.3), and the number of names for which :iscman:`named`
-   looks up IP addresses is capped at :any:`max-delegation-servers`.
-
-   This capped list of nameserver names is then randomly shuffled every time
+   :rfc:`4034` Section 6.3). This list is then randomly shuffled every time
    :iscman:`named` needs additional remote addresses for those nameservers.
    This randomized selection works around situations where the first few
    nameserver names in the zone are unresponsive.
@@ -4207,6 +4237,12 @@ Tuning
    initiates a remote fetch on an as-needed basis. This means that a new
    outgoing DNS query is initiated only if the DNS resolver does not already have
    existing IP addresses for any of the nameserver names in the cache.
+
+   The known NS addresses for an NS name (cached from a previous resolution, or
+   the NS name has glues, or it is defined from a local zone or hints) are
+   counted as delegation servers. Thus, the maximum queries the resolver does
+   to resolve a name at a delegation point is capped at
+   :any:`max-delegation-servers`.
 
    The default and recommended value is ``13``. This limit prevents excessive
    resource use while processing large or misconfigured delegations. The default
@@ -4242,6 +4278,18 @@ Tuning
    The default :any:`max-cache-ttl` is 604800 (one week). A value of zero may cause
    all queries to return SERVFAIL, because of lost caches of intermediate RRsets
    (such as NS and glue AAAA/A records) in the resolution process.
+
+.. namedconf:statement:: max-delegation-ttl
+   :tags: server
+   :short: Configure the maximum time (in seconds) that the server caches delegations.
+
+   This sets the maximum time for which the server caches nameserver names and
+   glues for a delegation, in seconds. For convenience, TTL-style time-unit
+   suffixes may be used to specify the value. It also accepts ISO 8601 duration
+   formats.
+
+   Setting a value of ``0`` disable the maximum TTL check for delegations. The
+   default :any:`max-delegation-ttl` is ``0``.
 
 .. namedconf:statement:: max-stale-ttl
    :tags: server
@@ -4636,9 +4684,6 @@ that matches all clients.
    ``version.bind`` with type ``TXT`` and class ``CHAOS``. The default is
    the real version number of this server. Specifying ``version none``
    disables processing of the queries.
-
-   Setting :any:`version` to any value (including ``none``) also disables
-   queries for ``authors.bind TXT CH``.
 
 .. namedconf:statement:: hostname
    :tags: server
@@ -5065,8 +5110,8 @@ rewriting in the following order:
    response-policy option.
 2. Prefer CLIENT-IP to QNAME to IP to NSDNAME to NSIP triggers in a
    single zone.
-3. Among NSDNAME triggers, prefer the trigger that matches the smallest
-   name under the DNSSEC ordering.
+3. Among NSDNAME triggers, prefer the trigger whose matched name server
+   domain name appears last in the DNSSEC canonical ordering.
 4. Among IP or NSIP triggers, prefer the trigger with the longest
    prefix.
 5. Among triggers with the same prefix length, prefer the IP or NSIP
@@ -6658,6 +6703,9 @@ The following options apply to DS queries sent to :any:`parental-agents`:
    :option:`rndc dnssec -checkds <rndc dnssec>` with the appropriate parameters,
    to signal that specific DS records are published and/or withdrawn.
 
+   Responses to DS queries are validated, so :any:`dnssec-validation` must be
+   enabled for the server.
+
 .. namedconf:statement:: parental-source
    :tags: dnssec
    :short: Specifies which local IPv4 source address is used to send parental DS queries.
@@ -6740,9 +6788,8 @@ with that view. When no view-specific value is given, the value in the
 default values specified in the :any:`view` statement; these view-specific
 defaults take precedence over those in the :namedconf:ref:`options` statement.
 
-Views are class-specific. If no class is given, class IN is assumed.
-Note that all non-IN views must contain a hint zone, since only the IN
-class has compiled-in default hints.
+Only class IN can be used for the views.  If no class is given, class IN is
+assumed.
 
 If there are no :any:`view` statements in the config file, a default view
 that matches any client is automatically created in class IN. Any

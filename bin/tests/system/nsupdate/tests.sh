@@ -485,8 +485,10 @@ grep "status: NOERROR" dig.out.ns1.$n >/dev/null || ret=1
 n=$((n + 1))
 ret=0
 echo_i "check that TYPE=0 update is handled ($n)"
+nextpart ns1/named.run >/dev/null
 echo "a0e4280000010000000100000000060001c00c000000fe000000000000" \
-  | $PERL ../packet.pl -a 10.53.0.1 -p ${PORT} -t tcp >/dev/null || ret=1
+  | $PERL ../packet.pl -a 10.53.0.1 -p ${PORT} -t tcp -b >/dev/null || ret=1
+wait_for_log 2 "message parsing failed: FORMERR" ns1/named.run || ret=1
 $DIG $DIGOPTS +tcp version.bind txt ch @10.53.0.1 >dig.out.ns1.$n || ret=1
 grep "status: NOERROR" dig.out.ns1.$n >/dev/null || ret=1
 [ $ret = 0 ] || {
@@ -497,20 +499,10 @@ grep "status: NOERROR" dig.out.ns1.$n >/dev/null || ret=1
 n=$((n + 1))
 ret=0
 echo_i "check that TYPE=0 additional data is handled ($n)"
+nextpart ns1/named.run >/dev/null
 echo "a0e4280000010000000000010000060001c00c000000fe000000000000" \
-  | $PERL ../packet.pl -a 10.53.0.1 -p ${PORT} -t tcp >/dev/null || ret=1
-$DIG $DIGOPTS +tcp version.bind txt ch @10.53.0.1 >dig.out.ns1.$n || ret=1
-grep "status: NOERROR" dig.out.ns1.$n >/dev/null || ret=1
-[ $ret = 0 ] || {
-  echo_i "failed"
-  status=1
-}
-
-n=$((n + 1))
-ret=0
-echo_i "check that update to undefined class is handled ($n)"
-echo "a0e4280000010001000000000000060101c00c000000fe000000000000" \
-  | $PERL ../packet.pl -a 10.53.0.1 -p ${PORT} -t tcp >/dev/null || ret=1
+  | $PERL ../packet.pl -a 10.53.0.1 -p ${PORT} -t tcp -b >/dev/null || ret=1
+wait_for_log 2 "message parsing failed: FORMERR" ns1/named.run || ret=1
 $DIG $DIGOPTS +tcp version.bind txt ch @10.53.0.1 >dig.out.ns1.$n || ret=1
 grep "status: NOERROR" dig.out.ns1.$n >/dev/null || ret=1
 [ $ret = 0 ] || {
@@ -537,14 +529,14 @@ ret=0
 echo_i "check that unixtime serial number is correctly generated ($n)"
 $DIG $DIGOPTS +short unixtime.nil. soa @10.53.0.1 >dig.out.old.test$n || ret=1
 oldserial=$(awk '{print $3}' dig.out.old.test$n) || ret=1
-start=$($PERL -e 'print time()."\n";')
+start=$(date +%s)
 $NSUPDATE <<END >/dev/null 2>&1 || ret=1
     server 10.53.0.1 ${PORT}
     ttl 600
     update add new.unixtime.nil in a 1.2.3.4
     send
 END
-now=$($PERL -e 'print time()."\n";')
+now=$(date +%s)
 sleep 1
 $DIG $DIGOPTS +short unixtime.nil. soa @10.53.0.1 >dig.out.new.test$n || ret=1
 serial=$(awk '{print $3}' dig.out.new.test$n) || ret=1
@@ -1707,7 +1699,7 @@ $NSUPDATE <<END >/dev/null 2>&1 || ret=1
     update add new.yyyymmddvv.nil in a 1.2.3.4
     send
 END
-now=$($PERL -e '@lt=localtime(); printf "%.4d%0.2d%0.2d00\n",$lt[5]+1900,$lt[4]+1,$lt[3];')
+now=$(date +%Y%m%d00)
 sleep 1
 serial=$($DIG $DIGOPTS +short yyyymmddvv.nil. soa @10.53.0.1 | awk '{print $3}') || ret=1
 [ "$oldserial" -ne "$serial" ] || ret=1
@@ -1779,13 +1771,11 @@ send
 EOF
 done
 # check that the journal is big enough to require truncation.
-size=$($PERL -e 'use File::stat; my $sb = stat(@ARGV[0]); printf("%s\n", $sb->size);' ns1/maxjournal.db.jnl)
-[ "$size" -gt 6000 ] || ret=1
+[ $(wc -c <ns1/maxjournal.db.jnl) -gt 6000 ] || ret=1
 sleep 1
 $RNDCCMD 10.53.0.1 sync maxjournal.test
 check_size_lt_5000() (
-  size=$($PERL -e 'use File::stat; my $sb = stat(@ARGV[0]); printf("%s\n", $sb->size);' ns1/maxjournal.db.jnl)
-  [ "$size" -lt 5000 ]
+  [ $(wc -c <ns1/maxjournal.db.jnl) -lt 5000 ]
 )
 retry_quiet 20 check_size_lt_5000 || ret=1
 [ $ret = 0 ] || {
@@ -1909,14 +1899,14 @@ grep "records in zone (4) exceeds max-records (3)" ns3/named.run >/dev/null || r
 n=$((n + 1))
 ret=0
 echo_i "check whether valid addresses are used for primary failover (UDP with defaults) ($n)"
-t1=$($PERL -e 'print time()')
+t1=$(date +%s)
 $NSUPDATE <<END >nsupdate.out.test$n 2>&1 && ret=1
 server 10.53.0.4 ${PORT}
 zone unreachable.
 update add unreachable. 600 A 192.0.2.1
 send
 END
-t2=$($PERL -e 'print time()')
+t2=$(date +%s)
 grep "; Communication with 10.53.0.4#${PORT} failed: timed out" nsupdate.out.test$n >/dev/null 2>&1 || ret=1
 grep "not implemented" nsupdate.out.test$n >/dev/null 2>&1 && ret=1
 elapsed=$((t2 - t1))
@@ -1931,14 +1921,14 @@ test $elapsed -gt 15 && ret=1
 n=$((n + 1))
 ret=0
 echo_i "check whether valid addresses are used for primary failover (UDP with -u udptimeout) ($n)"
-t1=$($PERL -e 'print time()')
+t1=$(date +%s)
 $NSUPDATE -u 4 -r 1 <<END >nsupdate.out.test$n 2>&1 && ret=1
 server 10.53.0.4 ${PORT}
 zone unreachable.
 update add unreachable. 600 A 192.0.2.1
 send
 END
-t2=$($PERL -e 'print time()')
+t2=$(date +%s)
 grep "; Communication with 10.53.0.4#${PORT} failed: timed out" nsupdate.out.test$n >/dev/null 2>&1 || ret=1
 grep "not implemented" nsupdate.out.test$n >/dev/null 2>&1 && ret=1
 elapsed=$((t2 - t1))
@@ -1953,14 +1943,14 @@ test $elapsed -gt 12 && ret=1
 n=$((n + 1))
 ret=0
 echo_i "check whether valid addresses are used for primary failover (UDP with -t timeout) ($n)"
-t1=$($PERL -e 'print time()')
+t1=$(date +%s)
 $NSUPDATE -u 0 -t 8 -r 1 <<END >nsupdate.out.test$n 2>&1 && ret=1
 server 10.53.0.4 ${PORT}
 zone unreachable.
 update add unreachable. 600 A 192.0.2.1
 send
 END
-t2=$($PERL -e 'print time()')
+t2=$(date +%s)
 grep "; Communication with 10.53.0.4#${PORT} failed: timed out" nsupdate.out.test$n >/dev/null 2>&1 || ret=1
 grep "not implemented" nsupdate.out.test$n >/dev/null 2>&1 && ret=1
 elapsed=$((t2 - t1))
@@ -1975,14 +1965,14 @@ test $elapsed -gt 12 && ret=1
 n=$((n + 1))
 ret=0
 echo_i "check whether valid addresses are used for primary failover (UDP with -u udptimeout -t timeout) ($n)"
-t1=$($PERL -e 'print time()')
+t1=$(date +%s)
 $NSUPDATE -u 4 -t 30 -r 1 <<END >nsupdate.out.test$n 2>&1 && ret=1
 server 10.53.0.4 ${PORT}
 zone unreachable.
 update add unreachable. 600 A 192.0.2.1
 send
 END
-t2=$($PERL -e 'print time()')
+t2=$(date +%s)
 grep "; Communication with 10.53.0.4#${PORT} failed: timed out" nsupdate.out.test$n >/dev/null 2>&1 || ret=1
 grep "not implemented" nsupdate.out.test$n >/dev/null 2>&1 && ret=1
 elapsed=$((t2 - t1))
@@ -1997,14 +1987,14 @@ test $elapsed -gt 12 && ret=1
 n=$((n + 1))
 ret=0
 echo_i "check whether valid addresses are used for primary failover (TCP with -t timeout) ($n)"
-t1=$($PERL -e 'print time()')
+t1=$(date +%s)
 $NSUPDATE -t 8 -v <<END >nsupdate.out.test$n 2>&1 && ret=1
 server 10.53.0.4 ${PORT}
 zone unreachable.
 update add unreachable. 600 A 192.0.2.1
 send
 END
-t2=$($PERL -e 'print time()')
+t2=$(date +%s)
 grep "; Communication with 10.53.0.4#${PORT} failed: timed out" nsupdate.out.test$n >/dev/null 2>&1 || ret=1
 grep "not implemented" nsupdate.out.test$n >/dev/null 2>&1 && ret=1
 elapsed=$((t2 - t1))
@@ -2438,6 +2428,32 @@ END
   } &
 done
 wait_for_log 10 "too many DNS UPDATEs queued" ns1/named.run || ret=1
+[ $ret = 0 ] || {
+  echo_i "failed"
+  status=1
+}
+
+n=$((n + 1))
+ret=0
+echo_i "check that grant external pass client address properly ($n)" {
+($PYTHON -m isctest.tools.authsock --type=CNAME --path=ns1/auth.sock --pidfile=authsock.pid --timeout=120 >authsock.out.test$n 2>&1 &) &
+sleep 1
+nextpart authsock.out.test$n >/dev/null
+$NSUPDATE -k ns1/ddns.key -d <<EOF >nsupdate.udp.test$n 2>&1 || ret=1
+server 10.53.0.1 ${PORT}
+zone grant-external.test
+update add cnameoverudp.grant-external.test 0 IN CNAME grant-external.test.
+send
+EOF
+nextpart authsock.out.test$n | grep ' addr= ' >/dev/null || ret=1
+$NSUPDATE -v -d <<EOF >nsupdate.tcp.test$n 2>&1 || ret=1
+server 10.53.0.1 ${PORT}
+zone grant-external.test
+update add cnameovertcp.grant-external.test 0 IN CNAME grant-external.test.
+send
+EOF
+nextpart authsock.out.test$n | grep ' addr=10.53.0.1 ' >/dev/null || ret=1
+kill $(cat authsock.pid) || true
 [ $ret = 0 ] || {
   echo_i "failed"
   status=1

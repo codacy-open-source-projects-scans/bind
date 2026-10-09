@@ -1008,7 +1008,8 @@ n=$((n + 1))
 echo_i "testing updating inline secure serial via 'rndc signing -serial' ($n)"
 ret=0
 $DIG $DIGOPTS nsec3. SOA @10.53.0.3 >dig.out.n3.pre.test$n || ret=1
-newserial=$($PERL -e 'while (<>) { chomp; my @field = split /\s+/; printf("%u\n", $field[6] + 10) if ($field[3] eq "SOA"); }' <dig.out.n3.pre.test$n)
+oldserial=$(awk '$4 == "SOA" { print $7 }' dig.out.n3.pre.test$n)
+newserial=$((oldserial + 10))
 $RNDCCMD 10.53.0.3 signing -serial ${newserial:-0} nsec3 >/dev/null 2>&1 || ret=1
 retry_quiet 5 wait_for_serial 10.53.0.3 nsec3. "${newserial:-0}" dig.out.ns3.post.test$n || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
@@ -1019,7 +1020,7 @@ echo_i "testing updating inline secure serial via 'rndc signing -serial' with ne
 ret=0
 $DIG $DIGOPTS nsec3. SOA @10.53.0.3 >dig.out.n3.pre.test$n || ret=1
 oldserial=$(awk '$4 == "SOA" { print $7 }' dig.out.n3.pre.test$n)
-newserial=$($PERL -e 'while (<>) { chomp; my @field = split /\s+/; printf("%u\n", $field[6] - 10) if ($field[3] eq "SOA"); }' <dig.out.n3.pre.test$n)
+newserial=$((oldserial - 10))
 $RNDCCMD 10.53.0.3 signing -serial ${newserial:-0} nsec3 >/dev/null 2>&1 || ret=1
 sleep 1
 $DIG $DIGOPTS nsec3. SOA @10.53.0.3 >dig.out.ns3.post.test$n || ret=1
@@ -1036,7 +1037,7 @@ echo_i "testing updating inline secure serial via 'rndc signing -serial' when fr
 ret=0
 $DIG $DIGOPTS nsec3. SOA @10.53.0.3 >dig.out.n3.pre.test$n || ret=1
 oldserial=$(awk '$4 == "SOA" { print $7 }' dig.out.n3.pre.test$n)
-newserial=$($PERL -e 'while (<>) { chomp; my @field = split /\s+/; printf("%u\n", $field[6] + 10) if ($field[3] eq "SOA"); }' <dig.out.n3.pre.test$n)
+newserial=$((oldserial + 10))
 $RNDCCMD 10.53.0.3 freeze nsec3 >/dev/null 2>&1 || ret=1
 $RNDCCMD 10.53.0.3 signing -serial ${newserial:-0} nsec3 >/dev/null 2>&1 || ret=1
 $RNDCCMD 10.53.0.3 thaw nsec3 >/dev/null 2>&1 || ret=1
@@ -1048,7 +1049,8 @@ n=$((n + 1))
 echo_i "testing updating dynamic serial via 'rndc signing -serial' ($n)"
 ret=0
 $DIG $DIGOPTS bits. SOA @10.53.0.2 >dig.out.ns2.pre.test$n || ret=1
-newserial=$($PERL -e 'while (<>) { chomp; my @field = split /\s+/; printf("%u\n", $field[6] + 10) if ($field[3] eq "SOA"); }' <dig.out.ns2.pre.test$n)
+oldserial=$(awk '$4 == "SOA" { print $7 }' dig.out.ns2.pre.test$n)
+newserial=$((oldserial + 10))
 $RNDCCMD 10.53.0.2 signing -serial ${newserial:-0} bits >/dev/null 2>&1 || ret=1
 retry_quiet 5 wait_for_serial 10.53.0.2 bits. "${newserial:-0}" dig.out.ns2.post.test$n || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
@@ -1059,7 +1061,7 @@ echo_i "testing updating dynamic serial via 'rndc signing -serial' with negative
 ret=0
 $DIG $DIGOPTS bits. SOA @10.53.0.2 >dig.out.ns2.pre.test$n || ret=1
 oldserial=$(awk '$4 == "SOA" { print $7 }' dig.out.ns2.pre.test$n)
-newserial=$($PERL -e 'while (<>) { chomp; my @field = split /\s+/; printf("%u\n", $field[6] - 10) if ($field[3] eq "SOA"); }' <dig.out.ns2.pre.test$n)
+newserial=$((oldserial - 10))
 $RNDCCMD 10.53.0.2 signing -serial ${newserial:-0} bits >/dev/null 2>&1 || ret=1
 retry_quiet 5 wait_for_serial 10.53.0.2 bits. "${newserial:-1}" dig.out.ns2.post1.test$n && ret=1
 retry_quiet 5 wait_for_serial 10.53.0.2 bits. "${oldserial:-1}" dig.out.ns2.post2.test$n || ret=1
@@ -1071,7 +1073,7 @@ echo_i "testing updating dynamic serial via 'rndc signing -serial' when frozen (
 ret=0
 $DIG $DIGOPTS bits. SOA @10.53.0.2 >dig.out.ns2.pre.test$n || ret=1
 oldserial=$(awk '$4 == "SOA" { print $7 }' dig.out.ns2.pre.test$n)
-newserial=$($PERL -e 'while (<>) { chomp; my @field = split /\s+/; printf("%u\n", $field[6] + 10) if ($field[3] eq "SOA"); }' <dig.out.ns2.pre.test$n)
+newserial=$((oldserial + 10))
 $RNDCCMD 10.53.0.2 freeze bits >/dev/null 2>&1 || ret=1
 $RNDCCMD 10.53.0.2 signing -serial ${newserial:-0} bits >/dev/null 2>&1 && ret=1
 $RNDCCMD 10.53.0.2 thaw bits >/dev/null 2>&1 || ret=1
@@ -1084,13 +1086,13 @@ status=$((status + ret))
 # processed.  As waiting for a fixed amount of time is suboptimal and there is
 # no single message that would signify both a successful modification and an
 # error in a race-free manner, instead wait until either notifies are sent
-# (which means the secure zone was modified) or a receive_secure_serial() error
-# is logged (which means the zone was not modified and will not be modified any
-# further in response to the relevant raw zone update).
+# (which means the secure zone was modified) or an inline_sync error is logged
+# (which means the zone was not modified and will not be modified any further in
+# response to the relevant raw zone update).
 wait_until_raw_zone_update_is_processed() {
   zone="$1"
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    if nextpart ns3/named.run | grep -E "zone ${zone}.*(sending notifies|receive_secure_serial)" >/dev/null; then
+    if nextpart ns3/named.run | grep -E "zone ${zone}.*(sending notifies|inline_sync)" >/dev/null; then
       return
     fi
     sleep 1
@@ -1273,11 +1275,11 @@ stop_server --use-rndc --halt --port ${CONTROLPORT} ns3 || ret=1
 ensure_sigs_only_in_journal delayedkeys ns3/delayedkeys.db.signed
 start_server --noclean --restart --port ${PORT} ns3 || ret=1
 # At this point, the raw zone journal will not have a source serial set.  Upon
-# server startup, receive_secure_serial() will rectify that, update SOA, resign
-# it, and schedule its future resign.  This will cause "rndc zonestatus" to
-# return delayedkeys/SOA as the next node to resign, so we restart the server
-# once again; with the raw zone journal now having a source serial set,
-# receive_secure_serial() should refrain from introducing any zone changes.
+# server startup, inline_sync_run() will rectify that, update SOA, resign it,
+# and schedule its future resign.  This will cause "rndc zonestatus" to return
+# delayedkeys/SOA as the next node to resign, so we restart the server once
+# again; with the raw zone journal now having a source serial set,
+# inline_sync_run() should refrain from introducing any zone changes.
 stop_server --use-rndc --halt --port ${CONTROLPORT} ns3 || ret=1
 ensure_sigs_only_in_journal delayedkeys ns3/delayedkeys.db.signed
 nextpart ns3/named.run >/dev/null
@@ -1380,6 +1382,45 @@ ttl2=$(awk '$4 == "SOA" { print $2 }' dig.out.ns8.test$n.soa2)
 test ${soa1:-1000} -lt ${soa2:-0} || ret=1
 test ${ttl1:-0} -eq 300 || ret=1
 test ${ttl2:-0} -eq 400 || ret=1
+test "$ret" -eq 0 || echo_i "failed"
+status=$((status + ret))
+
+n=$((n + 1))
+echo_i "Test oversized private record is properly ignored ($n)"
+ret=0
+zone=oversized-private-record
+cat >ns3/oversized-private-record.db <<EOF
+@ 0 IN SOA . . 0 0 0 0 0
+@ 0 IN NS ns3
+@ 0 IN NS ns7
+ns3 0 IN A 10.53.0.3
+ns7 0 IN A 10.53.0.7
+; 1st and 3rd octets are zero to ensure length check is exercised
+@ IN TYPE65534 \\# 262 ( 0041004141414141414141414141414141
+                         4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 4141414141414141414141414141414141
+			 41414141414141 )
+EOF
+$RNDCCMD 10.53.0.3 addzone $zone \
+  '{ type primary; file "oversized-private-record.db"; allow-transfer { any; }; };' || ret=1
+$RNDCCMD 10.53.0.7 addzone $zone \
+  '{ type secondary; file "oversized-private-record.bk"; primaries { 10.53.0.3;}; dnssec-policy default; };' || ret=1
+sleep 1
+dig_with_opts @10.53.0.7 $zone TYPE65534 >dig.out.ns7.test$n.soa || ret=1
+grep "status: NOERROR" dig.out.ns7.test$n.soa >/dev/null || ret=1
+grep "TYPE65534.\\\\# 262" dig.out.ns7.test$n.soa >/dev/null || ret=1
 test "$ret" -eq 0 || echo_i "failed"
 status=$((status + ret))
 

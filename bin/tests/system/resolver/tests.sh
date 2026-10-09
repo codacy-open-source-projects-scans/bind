@@ -316,7 +316,7 @@ $NSUPDATE <<EOF
 server 10.53.0.6 ${PORT}
 zone example.net
 update delete mail.example.net A
-update add mail.example.net 0 AAAA ::1
+update add mail.example.net 30 AAAA ::1
 send
 EOF
 dig_with_opts +tcp a mail.example.net @10.53.0.7 >dig.ns7.out.${n} || ret=2
@@ -326,14 +326,17 @@ if [ $ret = 2 ]; then echo_i "ncache priming failed"; fi
 dig_with_opts +tcp mx example.net @10.53.0.7 >dig.ns7.out.${n} || ret=3
 grep "status: NOERROR" dig.ns7.out.${n} >/dev/null || ret=3
 dig_with_opts +tcp rrsig mail.example.net +norec @10.53.0.7 >dig.ns7.out.${n} || ret=4
-grep "status: NOERROR" dig.ns7.out.${n} >/dev/null || ret=4
+grep "status: SERVFAIL" dig.ns7.out.${n} >/dev/null || ret=4
 grep "ANSWER: 0" dig.ns7.out.${n} >/dev/null || ret=4
-if [ $ret != 0 ]; then
-  echo_i "failed"
-  ret=1
-fi
-status=$((status + ret))
-
+dig_with_opts +tcp aaaa mail.example.net +norec @10.53.0.7 >dig.ns7.out.${n} || ret=5
+grep "status: SERVFAIL" dig.ns7.out.${n} >/dev/null || ret=5
+grep "ANSWER: 0" dig.ns7.out.${n} >/dev/null || ret=5
+dig_with_opts +tcp aaaa mail.example.net @10.53.0.7 >dig.ns7.out.${n} || ret=6
+grep "status: NOERROR" dig.ns7.out.${n} >/dev/null || ret=6
+grep "ANSWER: 1" dig.ns7.out.${n} >/dev/null || ret=6
+dig_with_opts +tcp aaaa mail.example.net +norec @10.53.0.7 >dig.ns7.out.${n} || ret=7
+grep "status: NOERROR" dig.ns7.out.${n} >/dev/null || ret=7
+grep "ANSWER: 1" dig.ns7.out.${n} >/dev/null || ret=7
 if [ $ret != 0 ]; then
   echo_i "failed"
   ret=1
@@ -685,7 +688,7 @@ for i in $zerotonine $zerotonine $zerotonine $zerotonine; do
   ttl2=$(awk '/"A" "short" "ttl"/ { print $2 }' dig.out.2.${n})
   test "${ttl2:-1}" -eq 0 && break
   test "${ttl2:-1}" -ge "${ttl1:-0}" && break
-  "${PERL}" -e 'select(undef, undef, undef, 0.05);'
+  "${PYTHON}" -c 'import time; time.sleep(0.05)'
 done
 test "${ttl2:-1}" -eq 0 && ret=1
 test "${ttl2:-1}" -ge "${ttl1:-0}" || ret=1
@@ -783,10 +786,10 @@ if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 
 n=$((n + 1))
-echo_i "checking NXDOMAIN is returned when querying non existing domain in CH class ($n)"
+echo_i "checking REFUSED is returned when querying name in CH class ($n)"
 ret=0
 dig_with_opts @10.53.0.1 id.hostname txt ch >dig.ns1.out.${n} || ret=1
-grep "status: NXDOMAIN" dig.ns1.out.${n} >/dev/null || ret=1
+grep "status: REFUSED" dig.ns1.out.${n} >/dev/null || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 

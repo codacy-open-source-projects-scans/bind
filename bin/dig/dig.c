@@ -570,6 +570,8 @@ dns64prefix_answer(dns_message_t *msg, isc_buffer_t *buf) {
 		return ISC_R_SUCCESS;
 	} else if (result != ISC_R_SUCCESS) {
 		return result;
+	} else if (rdataset->rdclass != dns_rdataclass_in) {
+		return ISC_R_SUCCESS;
 	}
 
 	result = dns_dns64_findprefix(rdataset, prefix, &count);
@@ -1519,7 +1521,8 @@ static dig_lookup_t *
 plus_option(char *option, bool is_batchfile, bool *need_clone,
 	    dig_lookup_t *lookup) {
 	isc_result_t result;
-	char *cmd, *value, *last = NULL, *code, *extra;
+	const char *cmd, *tail;
+	char *value, *last = NULL, *code, *extra;
 	uint32_t num;
 	bool state = true;
 	size_t n;
@@ -1530,8 +1533,9 @@ plus_option(char *option, bool is_batchfile, bool *need_clone,
 		printf(";; Invalid option %s\n", option);
 		return lookup;
 	}
-	if (strncasecmp(cmd, "no", 2) == 0) {
-		cmd += 2;
+	tail = isc_string_casestripprefix(cmd, "no");
+	if (tail != NULL) {
+		cmd = tail;
 		state = false;
 	}
 	/* parse the rest of the string */
@@ -1719,6 +1723,9 @@ plus_option(char *option, bool is_batchfile, bool *need_clone,
 						lookup->rdtype =
 							dns_rdatatype_aaaa;
 						lookup->rdtypeset = true;
+						lookup->rdclass =
+							dns_rdataclass_in;
+						lookup->rdclassset = true;
 						ISC_LIST_APPEND(lookup_list,
 								lookup, link);
 					}
@@ -2627,8 +2634,8 @@ static const char *single_dash_opts = "46dFhimnruv";
 static const char *dash_opts = "46bcdFfhikmnpqrtvyx";
 static bool
 dash_option(char *option, char *next, dig_lookup_t **lookup,
-	    bool *open_type_class, bool *need_clone, bool config_only, int argc,
-	    char **argv, bool *firstarg) {
+	    bool *open_type_class, bool *need_clone, bool config_only,
+	    bool *added_lookup) {
 	char opt, *value, *ptr, *ptr2, *ptr3, *last;
 	isc_result_t result;
 	bool value_from_next;
@@ -2640,6 +2647,7 @@ dash_option(char *option, char *next, dig_lookup_t **lookup,
 	struct in6_addr in6;
 	in_port_t srcport;
 	char *hash, *cmd;
+	const char *ixfrserial = NULL;
 	uint32_t num;
 
 	while (strpbrk(option, single_dash_opts) == &option[0]) {
@@ -2799,17 +2807,16 @@ dash_option(char *option, char *next, dig_lookup_t **lookup,
 			(*lookup)->trace_root = ((*lookup)->trace ||
 						 (*lookup)->ns_search_only);
 			(*lookup)->new_search = true;
-			if (*firstarg) {
-				printgreeting(argc, argv, *lookup);
-				*firstarg = false;
-			}
+			*added_lookup = true;
 			ISC_LIST_APPEND(lookup_list, *lookup, link);
 			debug("looking up %s", (*lookup)->textname);
 		}
 		return value_from_next;
 	case 't':
 		*open_type_class = false;
-		if (strncasecmp(value, "ixfr=", 5) == 0) {
+		if ((ixfrserial = isc_string_casestripprefix(value, "ixfr=")) !=
+		    NULL)
+		{
 			rdtype = dns_rdatatype_ixfr;
 			result = ISC_R_SUCCESS;
 		} else {
@@ -2832,7 +2839,7 @@ dash_option(char *option, char *next, dig_lookup_t **lookup,
 				uint32_t serial;
 				(*lookup)->rdtype = dns_rdatatype_ixfr;
 				(*lookup)->rdtypeset = true;
-				result = parse_uint(&serial, &value[5],
+				result = parse_uint(&serial, ixfrserial,
 						    MAXSERIAL, "serial number");
 				if (result != ISC_R_SUCCESS) {
 					fatal("Couldn't parse serial number");
@@ -2910,10 +2917,7 @@ dash_option(char *option, char *next, dig_lookup_t **lookup,
 				(*lookup)->rdclass = dns_rdataclass_in;
 			}
 			(*lookup)->new_search = true;
-			if (*firstarg) {
-				printgreeting(argc, argv, *lookup);
-				*firstarg = false;
-			}
+			*added_lookup = true;
 			ISC_LIST_APPEND(lookup_list, *lookup, link);
 		} else {
 			fprintf(stderr, "Invalid IP address %s\n", value);
@@ -3032,8 +3036,9 @@ static void
 parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 	isc_result_t result;
 	isc_textregion_t tr;
-	bool firstarg = true;
+	bool added_lookup = false;
 	dig_lookup_t *lookup = NULL;
+	dig_lookup_t *last_existing_lookup = ISC_LIST_TAIL(lookup_list);
 	dns_rdatatype_t rdtype;
 	dns_rdataclass_t rdclass;
 	bool open_type_class = true;
@@ -3042,6 +3047,7 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 	char *bargv[64];
 	int rc;
 	char **rv;
+	const char *ixfrserial = NULL;
 #ifndef NOPOSIX
 	char *homedir;
 	char rcfile[PATH_MAX];
@@ -3110,7 +3116,7 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 	rv = argv;
 	for (rc--, rv++; rc > 0; rc--, rv++) {
 		debug("main parsing %s", rv[0]);
-		if (strncmp(rv[0], "%", 1) == 0) {
+		if (rv[0][0] == '%') {
 			break;
 		}
 		if (rv[0][0] == '@') {
@@ -3146,8 +3152,7 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 			if (rc <= 1) {
 				if (dash_option(&rv[0][1], NULL, &lookup,
 						&open_type_class, &need_clone,
-						config_only, argc, argv,
-						&firstarg))
+						config_only, &added_lookup))
 				{
 					rc--;
 					rv++;
@@ -3155,8 +3160,7 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 			} else {
 				if (dash_option(&rv[0][1], rv[1], &lookup,
 						&open_type_class, &need_clone,
-						config_only, argc, argv,
-						&firstarg))
+						config_only, &added_lookup))
 				{
 					rc--;
 					rv++;
@@ -3167,7 +3171,9 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 			 * Anything which isn't an option
 			 */
 			if (open_type_class) {
-				if (strncasecmp(rv[0], "ixfr=", 5) == 0) {
+				if ((ixfrserial = isc_string_casestripprefix(
+					     rv[0], "ixfr=")) != NULL)
+				{
 					rdtype = dns_rdatatype_ixfr;
 					result = ISC_R_SUCCESS;
 				} else {
@@ -3199,7 +3205,7 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 							dns_rdatatype_ixfr;
 						lookup->rdtypeset = true;
 						result = parse_uint(&serial,
-								    &rv[0][5],
+								    ixfrserial,
 								    MAXSERIAL,
 								    "serial "
 								    "number");
@@ -3260,15 +3266,32 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 				lookup->trace_root = (lookup->trace ||
 						      lookup->ns_search_only);
 				lookup->new_search = true;
-				if (firstarg) {
-					printgreeting(argc, argv, lookup);
-					firstarg = false;
-				}
+				added_lookup = true;
 				ISC_LIST_APPEND(lookup_list, lookup, link);
 				debug("looking up %s", lookup->textname);
 			}
 			/* XXX Error message */
 		}
+	}
+
+	/*
+	 * The whole command line has now been parsed, so every option is in
+	 * its final state.  Build the greeting only now: deferring it until
+	 * here is what lets the banner reflect options such as +[no]cmd,
+	 * +short and +yaml that may follow the query name on the command line.
+	 *
+	 * The greeting belongs to the first lookup this call appended.  Because
+	 * lookup_list is global and may already hold lookups on entry (e.g.
+	 * "dig foo -f batchfile" queues "foo" before the batch file's first
+	 * line is parsed), that first lookup is the one right after
+	 * last_existing_lookup, or the list head if the list was empty.
+	 */
+	if (added_lookup) {
+		dig_lookup_t *greeting =
+			(last_existing_lookup != NULL)
+				? ISC_LIST_NEXT(last_existing_lookup, link)
+				: ISC_LIST_HEAD(lookup_list);
+		printgreeting(argc, argv, greeting);
 	}
 
 	/*
@@ -3321,10 +3344,7 @@ parse_args(bool is_batchfile, bool config_only, int argc, char **argv) {
 		strlcpy(lookup->textname, ".", sizeof(lookup->textname));
 		lookup->rdtype = dns_rdatatype_ns;
 		lookup->rdtypeset = true;
-		if (firstarg) {
-			printgreeting(argc, argv, lookup);
-			firstarg = false;
-		}
+		printgreeting(argc, argv, lookup);
 		ISC_LIST_APPEND(lookup_list, lookup, link);
 	}
 	if (!need_clone) {
@@ -3412,7 +3432,7 @@ static void
 dig_comments(dig_lookup_t *lookup, const char *format, ...) {
 	va_list args;
 
-	if (lookup->comments && !yaml) {
+	if (lookup->comments && !yaml && !short_form) {
 		printf(";; ");
 
 		va_start(args, format);

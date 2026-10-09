@@ -157,7 +157,7 @@ static dns_rdata_rrsig_t rrsig_test_data1 = {
 	.timeexpire = 1695820800,
 	.timesigned = 1695744000,
 	.keyid = 0x1234,
-	.signer = DNS_NAME_INITABSOLUTE(example_org_data),
+	.signer = DNS_LINKEDNAME_INITABSOLUTE(example_org_data),
 	.siglen = 64,
 	.signature = rrsig_signature1,
 };
@@ -172,7 +172,7 @@ static dns_rdata_rrsig_t rrsig_test_data2 = {
 	.timeexpire = 1695820800,
 	.timesigned = 1695744000,
 	.keyid = 0x5678,
-	.signer = DNS_NAME_INITABSOLUTE(example_org_data),
+	.signer = DNS_LINKEDNAME_INITABSOLUTE(example_org_data),
 	.siglen = 64,
 	.signature = rrsig_signature2,
 };
@@ -180,7 +180,8 @@ static dns_rdata_rrsig_t rrsig_test_data2 = {
 static bool
 ownercase_test_one(const char *str1, const char *str2) {
 	isc_result_t result;
-	uint8_t qpdb_s[sizeof(qpzonedb_t) + sizeof(qpzone_bucket_t)];
+	alignas(qpzonedb_t)
+		uint8_t qpdb_s[sizeof(qpzonedb_t) + sizeof(qpzone_bucket_t)];
 	qpzonedb_t *qpdb = (qpzonedb_t *)&qpdb_s;
 	*qpdb = (qpzonedb_t){
 		.common.methods = &qpdb_zonemethods,
@@ -291,7 +292,6 @@ verify_aaaa_records(dns_db_t *db, dns_dbversion_t *version,
 		    const dns_name_t *name, unsigned char (*ips)[16],
 		    ssize_t expected_count, uint32_t expected_ttl) {
 	isc_result_t result;
-	dns_dbnode_t *node = NULL;
 	dns_rdataset_t rdataset;
 	bool *found_ips = NULL;
 	dns_fixedname_t found_fname;
@@ -303,7 +303,7 @@ verify_aaaa_records(dns_db_t *db, dns_dbversion_t *version,
 
 	dns_rdataset_init(&rdataset);
 
-	result = dns_db_find(db, name, version, dns_rdatatype_aaaa, 0, 0, &node,
+	result = dns_db_find(db, name, version, dns_rdatatype_aaaa, 0, 0,
 			     found_name, &rdataset, NULL);
 	assert_int_equal(result, ISC_R_SUCCESS);
 
@@ -339,7 +339,6 @@ verify_aaaa_records(dns_db_t *db, dns_dbversion_t *version,
 	/* Verify we found exactly the expected number of records */
 	assert_int_equal(found_count, expected_count);
 
-	dns_db_detachnode(&node);
 	dns_rdataset_disassociate(&rdataset);
 	isc_mem_cput(isc_g_mctx, found_ips, (size_t)expected_count,
 		     sizeof(bool));
@@ -347,7 +346,8 @@ verify_aaaa_records(dns_db_t *db, dns_dbversion_t *version,
 
 ISC_RUN_TEST_IMPL(setownercase) {
 	isc_result_t result;
-	uint8_t qpdb_s[sizeof(qpzonedb_t) + sizeof(qpzone_bucket_t)];
+	alignas(qpzonedb_t)
+		uint8_t qpdb_s[sizeof(qpzonedb_t) + sizeof(qpzone_bucket_t)];
 	qpzonedb_t *qpdb = (qpzonedb_t *)&qpdb_s;
 	*qpdb = (qpzonedb_t){
 		.common.methods = &qpdb_zonemethods,
@@ -390,6 +390,17 @@ ISC_RUN_TEST_IMPL(setownercase) {
 ISC_RUN_TEST_IMPL(resign_sooner_values) {
 	dns_typepair_t soa = DNS_SIGTYPEPAIR(dns_rdatatype_soa);
 	dns_typepair_t other = DNS_SIGTYPEPAIR(dns_rdatatype_a);
+	dns_vecheader_t scheduled = {
+		.attributes = DNS_VECHEADERATTR_RESIGN,
+		.typepair = other,
+		.resign = 20,
+	};
+	dns_vecheader_t unscheduled = {
+		.typepair = other,
+		.resign = 0,
+	};
+	qpz_resign_t scheduled_elem = { .header = &scheduled };
+	qpz_resign_t unscheduled_elem = { .header = &unscheduled };
 
 	UNUSED(state);
 
@@ -401,6 +412,95 @@ ISC_RUN_TEST_IMPL(resign_sooner_values) {
 
 	assert_false(resign_sooner_values(10, soa, 10, soa));
 	assert_false(resign_sooner_values(10, other, 10, other));
+
+	assert_true(resign_sooner(&scheduled_elem, &unscheduled_elem));
+	assert_false(resign_sooner(&unscheduled_elem, &scheduled_elem));
+}
+
+ISC_RUN_TEST_IMPL(unscheduled_resign) {
+	isc_result_t result;
+	dns_db_t *db = NULL;
+	dns_dbnode_t *node = NULL;
+	dns_fixedname_t fixed;
+	dns_rdataset_t rdataset;
+	dns_typepair_t typepair;
+	isc_stdtime_t resign;
+
+	result = dns__qpzone_create(isc_g_mctx, &example_org_name,
+				    dns_dbtype_zone, dns_rdataclass_in, 0, NULL,
+				    NULL, &db);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	WITH_NEWVERSION(db, version, true) {
+		result = apply_dns_update(db, version, &example_org_name,
+					  dns_rdatatype_aaaa, dns_rdataclass_in,
+					  300, aaaa_test_data[0], 16,
+					  DNS_DIFFOP_ADD);
+		assert_int_equal(result, ISC_R_SUCCESS);
+	}
+
+	WITH_NEWVERSION(db, version, true) {
+		result = apply_dns_update(db, version, &example_org_name,
+					  dns_rdatatype_aaaa, dns_rdataclass_in,
+					  300, aaaa_test_data[1], 16,
+					  DNS_DIFFOP_ADD);
+		assert_int_equal(result, ISC_R_SUCCESS);
+	}
+
+	/*
+	 * Deliberately insert an ordinary header into the resigning heap to
+	 * verify that the defensive checks do not expose it as scheduled.
+	 */
+	result = dns_db_findnode(db, &example_org_name, false, &node);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	dns_rdataset_init(&rdataset);
+	result = dns_db_findrdataset(db, node, NULL, dns_rdatatype_aaaa, 0, 0,
+				     &rdataset, NULL);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	qpzonedb_t *qpdb = (qpzonedb_t *)db;
+	dns_vecheader_t *header = dns_vecheader_getheader(&rdataset);
+	LOCK(&qpdb->heap->lock);
+	resign_register(qpdb->heap, (qpznode_t *)node, header);
+	UNLOCK(&qpdb->heap->lock);
+
+	dns_fixedname_init(&fixed);
+	result = dns_db_getsigningtime(db, &resign, dns_fixedname_name(&fixed),
+				       &typepair);
+	assert_int_equal(result, ISC_R_NOTFOUND);
+
+	LOCK(&qpdb->heap->lock);
+	result = resign_unregister(qpdb->heap, (qpznode_t *)node, header);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	result = resign_unregister(qpdb->heap, (qpznode_t *)node, header);
+	assert_int_equal(result, ISC_R_NOTFOUND);
+	UNLOCK(&qpdb->heap->lock);
+
+	dns_rdataset_disassociate(&rdataset);
+	dns_db_detachnode(&node);
+
+	/*
+	 * A rolled-back subtraction must not register an ordinary header that
+	 * was not in the resigning heap before the transaction.
+	 */
+	WITH_NEWVERSION(db, version, false) {
+		result = apply_dns_update(db, version, &example_org_name,
+					  dns_rdatatype_aaaa, dns_rdataclass_in,
+					  300, aaaa_test_data[0], 16,
+					  DNS_DIFFOP_DEL);
+		assert_int_equal(result, ISC_R_SUCCESS);
+	}
+
+	LOCK(&qpdb->heap->lock);
+	assert_null(isc_heap_element(qpdb->heap->heap, 1));
+	UNLOCK(&qpdb->heap->lock);
+
+	result = dns_db_getsigningtime(db, &resign, dns_fixedname_name(&fixed),
+				       &typepair);
+	assert_int_equal(result, ISC_R_NOTFOUND);
+
+	dns_db_detach(&db);
 }
 
 ISC_RUN_TEST_IMPL(diffop_add_sub) {
@@ -449,6 +549,97 @@ ISC_RUN_TEST_IMPL(diffop_add_sub) {
 		assert_int_equal(result, DNS_R_NOTEXACT);
 	}
 
+	dns_db_detach(&db);
+	assert_null(db);
+}
+
+ISC_RUN_TEST_IMPL(wildcard_foundname) {
+	static const unsigned char address[] = { 192, 0, 2, 1 };
+	isc_result_t result;
+	dns_db_t *db = NULL;
+	dns_dbversion_t *version = NULL;
+	dns_fixedname_t fqname, fwild, ffound;
+	dns_name_t *qname = NULL, *wild = NULL, *found = NULL;
+	dns_rdataset_t rdataset;
+
+	result = dns__qpzone_create(isc_g_mctx, &example_org_name,
+				    dns_dbtype_zone, dns_rdataclass_in, 0, NULL,
+				    NULL, &db);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_non_null(db);
+
+	dns_test_namefromstring("host.example.org.", &fqname);
+	dns_test_namefromstring("*.example.org.", &fwild);
+	qname = dns_fixedname_name(&fqname);
+	wild = dns_fixedname_name(&fwild);
+	found = dns_fixedname_initname(&ffound);
+
+	WITH_NEWVERSION(db, newversion, true) {
+		apply_dns_update(db, newversion, wild, dns_rdatatype_a,
+				 dns_rdataclass_in, 300, address,
+				 sizeof(address), DNS_DIFFOP_ADD);
+	}
+
+	dns_rdataset_init(&rdataset);
+	dns_db_currentversion(db, &version);
+	result = dns_db_find(db, qname, version, dns_rdatatype_a, 0, 0, found,
+			     &rdataset, NULL);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(dns_name_equal(found, wild));
+	assert_true(found->attributes.wildcard);
+
+	dns_rdataset_disassociate(&rdataset);
+	dns_db_closeversion(db, &version, false);
+	dns_db_detach(&db);
+	assert_null(db);
+}
+
+ISC_RUN_TEST_IMPL(wildcard_delegation_foundname) {
+	isc_result_t result;
+	dns_db_t *db = NULL;
+	dns_dbversion_t *version = NULL;
+	dns_fixedname_t fqname, fwild, ffound;
+	dns_name_t *qname = NULL, *wild = NULL, *found = NULL;
+	dns_rdata_t ns = DNS_RDATA_INIT;
+	dns_rdataset_t rdataset;
+	unsigned char ns_data[256];
+
+	result = dns__qpzone_create(isc_g_mctx, &example_org_name,
+				    dns_dbtype_zone, dns_rdataclass_in, 0, NULL,
+				    NULL, &db);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_non_null(db);
+
+	dns_test_namefromstring("host.example.org.", &fqname);
+	dns_test_namefromstring("*.example.org.", &fwild);
+	qname = dns_fixedname_name(&fqname);
+	wild = dns_fixedname_name(&fwild);
+	found = dns_fixedname_initname(&ffound);
+
+	result = dns_test_rdatafromstring(
+		&ns, dns_rdataclass_in, dns_rdatatype_ns, ns_data,
+		sizeof(ns_data), "ns.child.example.org.", false);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	WITH_NEWVERSION(db, newversion, true) {
+		result = apply_dns_update(db, newversion, wild,
+					  dns_rdatatype_ns, dns_rdataclass_in,
+					  300, ns.data, ns.length,
+					  DNS_DIFFOP_ADD);
+		assert_int_equal(result, ISC_R_SUCCESS);
+	}
+
+	dns_rdataset_init(&rdataset);
+	dns_db_currentversion(db, &version);
+	result = dns_db_find(db, qname, version, dns_rdatatype_a, 0, 0, found,
+			     &rdataset, NULL);
+	assert_int_equal(result, DNS_R_DELEGATION);
+	assert_true(dns_name_equal(found, wild));
+	assert_true(found->attributes.wildcard);
+	assert_true(dns_rdataset_isassociated(&rdataset));
+
+	dns_rdataset_disassociate(&rdataset);
+	dns_db_closeversion(db, &version, false);
 	dns_db_detach(&db);
 	assert_null(db);
 }
@@ -516,11 +707,210 @@ ISC_RUN_TEST_IMPL(diffop_addresign) {
 	assert_null(db);
 }
 
+/*
+ * Add a single record to the database in a new version.
+ */
+static void
+add_record(dns_db_t *db, const char *owner, dns_rdatatype_t rdtype,
+	   const char *text) {
+	isc_result_t result;
+	dns_fixedname_t fowner;
+	dns_rdata_t rdata = DNS_RDATA_INIT;
+	unsigned char rdata_data[256];
+
+	dns_test_namefromstring(owner, &fowner);
+	result = dns_test_rdatafromstring(&rdata, dns_rdataclass_in, rdtype,
+					  rdata_data, sizeof(rdata_data), text,
+					  false);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	WITH_NEWVERSION(db, newversion, true) {
+		result = apply_dns_update(db, newversion,
+					  dns_fixedname_name(&fowner), rdtype,
+					  dns_rdataclass_in, 300, rdata.data,
+					  rdata.length, DNS_DIFFOP_ADD);
+		assert_int_equal(result, ISC_R_SUCCESS);
+	}
+}
+
+/*
+ * Create 'name' in the database's tree the way findnodeintree() does,
+ * except for its origin check, so the test can reproduce a database that
+ * was populated before out-of-zone data was rejected (for example a
+ * secondary zone file or journal written by an older version).
+ */
+static void
+create_node_unchecked(dns_db_t *db, const dns_name_t *name,
+		      dns_dbnode_t **nodep) {
+	qpzonedb_t *qpdb = (qpzonedb_t *)db;
+	qpznode_t *node = NULL;
+	dns_qpread_t qpr = { 0 };
+	dns_qp_t *qp = begin_transaction(qpdb, &qpr, true);
+	isc_result_t result;
+
+	result = dns_qp_getname(qp, name, DNS_DBNAMESPACE_NORMAL,
+				(void **)&node, NULL);
+	if (result == ISC_R_SUCCESS) {
+		qpznode_acquire(node DNS__DB_FILELINE);
+	} else {
+		node = new_qpznode(qpdb, name, DNS_DBNAMESPACE_NORMAL);
+		result = dns_qp_insert(qp, node, 0);
+		assert_int_equal(result, ISC_R_SUCCESS);
+		qpznode_erefs_increment(node DNS__DB_FILELINE);
+
+		addwildcards(qpdb, qp, name, DNS_DBNAMESPACE_NORMAL);
+		if (dns_name_iswildcard(name)) {
+			wildcardmagic(qpdb, qp, name, DNS_DBNAMESPACE_NORMAL);
+		}
+	}
+
+	end_transaction(qpdb, qp, true);
+
+	*nodep = (dns_dbnode_t *)node;
+}
+
+/*
+ * Add a single record whose owner is not below the zone origin, bypassing
+ * the out-of-zone check on node creation.
+ */
+static void
+add_record_unchecked(dns_db_t *db, const char *owner, dns_rdatatype_t rdtype,
+		     const char *text) {
+	isc_result_t result;
+	dns_fixedname_t fowner;
+	dns_dbnode_t *node = NULL;
+	dns_rdata_t rdata = DNS_RDATA_INIT;
+	dns_rdatalist_t rdatalist;
+	dns_rdataset_t rdataset;
+	unsigned char rdata_data[256];
+
+	dns_test_namefromstring(owner, &fowner);
+	result = dns_test_rdatafromstring(&rdata, dns_rdataclass_in, rdtype,
+					  rdata_data, sizeof(rdata_data), text,
+					  false);
+	assert_int_equal(result, ISC_R_SUCCESS);
+
+	dns_rdatalist_init(&rdatalist);
+	rdatalist.ttl = 300;
+	rdatalist.type = rdtype;
+	rdatalist.rdclass = dns_rdataclass_in;
+	ISC_LIST_APPEND(rdatalist.rdata, &rdata, link);
+
+	dns_rdataset_init(&rdataset);
+	dns_rdatalist_tordataset(&rdatalist, &rdataset);
+
+	create_node_unchecked(db, dns_fixedname_name(&fowner), &node);
+
+	WITH_NEWVERSION(db, newversion, true) {
+		result = dns_db_addrdataset(db, node, newversion, 0, &rdataset,
+					    0, NULL);
+		assert_int_equal(result, ISC_R_SUCCESS);
+	}
+
+	dns_db_detachnode(&node);
+	dns_rdataset_disassociate(&rdataset);
+}
+
+/*
+ * Look up 'qname'/'rdtype' in the current version of the database and
+ * return the result, with the found name in 'found'.
+ */
+static isc_result_t
+find_record(dns_db_t *db, const char *qname, dns_rdatatype_t rdtype,
+	    unsigned int options, dns_name_t *found) {
+	isc_result_t result;
+	dns_dbversion_t *version = NULL;
+	dns_fixedname_t fqname;
+	dns_rdataset_t rdataset;
+
+	dns_test_namefromstring(qname, &fqname);
+	dns_rdataset_init(&rdataset);
+	dns_db_currentversion(db, &version);
+	result = dns_db_find(db, dns_fixedname_name(&fqname), version, rdtype,
+			     options, 0, found, &rdataset, NULL);
+	dns_rdataset_cleanup(&rdataset);
+	dns_db_closeversion(db, &version, false);
+
+	return result;
+}
+
+/*
+ * Nodes that are not below the zone origin could end up in the database
+ * before out-of-zone data was rejected on load (e.g. from a secondary
+ * zone file carrying such data).  They must not be visible through
+ * lookups: not as zone cuts, DNAMEs or wildcards above the apex, nor as
+ * answers for names outside the zone.
+ */
+ISC_RUN_TEST_IMPL(nodes_outside_zone) {
+	isc_result_t result;
+	dns_db_t *db = NULL;
+	dns_fixedname_t ffound, fexpected;
+	dns_name_t *found = dns_fixedname_initname(&ffound);
+	dns_name_t *expected = NULL;
+
+	result = dns__qpzone_create(isc_g_mctx, &example_org_name,
+				    dns_dbtype_zone, dns_rdataclass_in, 0, NULL,
+				    NULL, &db);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_non_null(db);
+
+	add_record(db, "example.org.", dns_rdatatype_soa,
+		   "ns.example.org. root.example.org. 1 300 300 300 300");
+	add_record(db, "example.org.", dns_rdatatype_ns, "ns.example.org.");
+	add_record(db, "ns.example.org.", dns_rdatatype_a, "10.0.0.2");
+	add_record(db, "www.example.org.", dns_rdatatype_a, "10.0.0.1");
+
+	/* Above the origin. */
+	add_record_unchecked(db, "org.", dns_rdatatype_ns, "ns.attacker.");
+	add_record_unchecked(db, "org.", dns_rdatatype_dname, "attacker.");
+	add_record_unchecked(db, "*.org.", dns_rdatatype_a, "192.0.2.1");
+
+	/* Outside the zone altogether. */
+	add_record_unchecked(db, "mail.attacker.", dns_rdatatype_a,
+			     "192.0.2.2");
+	add_record_unchecked(db, "*.attacker.", dns_rdatatype_a, "192.0.2.3");
+
+	/* Names in the zone are answered from the zone. */
+	result = find_record(db, "www.example.org.", dns_rdatatype_a, 0, found);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	dns_test_namefromstring("www.example.org.", &fexpected);
+	expected = dns_fixedname_name(&fexpected);
+	assert_true(dns_name_equal(found, expected));
+
+	result = find_record(db, "example.org.", dns_rdatatype_soa, 0, found);
+	assert_int_equal(result, ISC_R_SUCCESS);
+	assert_true(dns_name_equal(found, &example_org_name));
+
+	/* The closest encloser of a nonexistent name is in the zone. */
+	result = find_record(db, "nx.example.org.", dns_rdatatype_a, 0, found);
+	assert_int_equal(result, DNS_R_NXDOMAIN);
+	assert_true(dns_name_equal(found, &example_org_name));
+	assert_false(found->attributes.wildcard);
+
+	/* Names outside the zone are not found, with or without glue. */
+	result = find_record(db, "mail.attacker.", dns_rdatatype_a, 0, found);
+	assert_int_equal(result, ISC_R_NOTFOUND);
+
+	result = find_record(db, "attacker.", dns_rdatatype_a,
+			     DNS_DBFIND_GLUEOK, found);
+	assert_int_equal(result, ISC_R_NOTFOUND);
+
+	result = find_record(db, "org.", dns_rdatatype_ns, 0, found);
+	assert_int_equal(result, ISC_R_NOTFOUND);
+
+	dns_db_detach(&db);
+	assert_null(db);
+}
+
 ISC_TEST_LIST_START
 ISC_TEST_ENTRY(ownercase)
 ISC_TEST_ENTRY(setownercase)
 ISC_TEST_ENTRY(resign_sooner_values)
+ISC_TEST_ENTRY(unscheduled_resign)
 ISC_TEST_ENTRY(diffop_add_sub)
+ISC_TEST_ENTRY(wildcard_foundname)
+ISC_TEST_ENTRY(wildcard_delegation_foundname)
+ISC_TEST_ENTRY(nodes_outside_zone)
 ISC_TEST_ENTRY(diffop_addresign)
 ISC_TEST_LIST_END
 

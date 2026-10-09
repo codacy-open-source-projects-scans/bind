@@ -354,11 +354,8 @@ control_respond(controlconnection_t *conn) {
 	/* Skip the length field (4 bytes) */
 	isc_buffer_add(conn->buffer, 4);
 
-	result = isccc_cc_towire(conn->response, &conn->buffer, conn->alg,
-				 &conn->secret);
-	if (result != ISC_R_SUCCESS) {
-		return;
-	}
+	CHECK(isccc_cc_towire(conn->response, &conn->buffer, conn->alg,
+			      &conn->secret));
 
 	isc_buffer_init(&b, conn->buffer->base, 4);
 	isc_buffer_putuint32(&b, conn->buffer->used - 4);
@@ -967,7 +964,8 @@ update_listener(named_controls_t *cp, controllistener_t **listenerp,
 		result = cfg_acl_fromconfig(allow, config, aclctx,
 					    listener->mctx, 0, &new_acl);
 	} else {
-		result = dns_acl_any(listener->mctx, &new_acl);
+		dns_acl_any(listener->mctx, &new_acl);
+		result = ISC_R_SUCCESS;
 	}
 
 	if (control != NULL) {
@@ -1045,7 +1043,7 @@ add_listener(named_controls_t *cp, controllistener_t **listenerp,
 			listener->readonly = cfg_obj_asboolean(readonly);
 		}
 	} else {
-		CHECK(dns_acl_any(mctx, &new_acl));
+		dns_acl_any(mctx, &new_acl);
 	}
 
 	dns_acl_attach(new_acl, &listener->acl);

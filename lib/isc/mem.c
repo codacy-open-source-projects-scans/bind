@@ -30,6 +30,7 @@
 #include <isc/mutex.h>
 #include <isc/os.h>
 #include <isc/overflow.h>
+#include <isc/random.h>
 #include <isc/refcount.h>
 #include <isc/stdtime.h>
 #include <isc/strerr.h>
@@ -57,6 +58,9 @@
 #include <jemalloc/jemalloc.h>
 #define JEMALLOC_API_SUPPORTED 1
 #else
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include "jemalloc_shim.h"
 #endif
 
@@ -126,7 +130,6 @@ static isc_mutex_t contextslock;
 typedef union {
 	struct {
 		atomic_int_fast64_t inuse;
-		atomic_bool is_overmem;
 	};
 	char padding[ISC_OS_CACHELINE_SIZE];
 } isc__mem_stat_t;
@@ -310,15 +313,7 @@ add_trace_entry(isc_mem_t *mctx, const void *ptr, size_t size FLARG) {
 		goto unlock;
 	}
 
-#ifdef __COVERITY__
-	/*
-	 * Use simple conversion from pointer to hash to avoid
-	 * tainting 'ptr' due to byte swap in isc_hash32.
-	 */
-	hash = (uintptr_t)ptr >> 3;
-#else
 	hash = isc_hash32(&ptr, sizeof(ptr), true);
-#endif
 	idx = hash % DEBUG_TABLE_COUNT;
 
 	dl = mallocx(dlsize, mctx->jemalloc_flags);
@@ -354,15 +349,7 @@ delete_trace_entry(isc_mem_t *mctx, const void *ptr, size_t size FLARG) {
 		goto unlock;
 	}
 
-#ifdef __COVERITY__
-	/*
-	 * Use simple conversion from pointer to hash to avoid
-	 * tainting 'ptr' due to byte swap in isc_hash32.
-	 */
-	hash = (uintptr_t)ptr >> 3;
-#else
 	hash = isc_hash32(&ptr, sizeof(ptr), true);
-#endif
 	idx = hash % DEBUG_TABLE_COUNT;
 
 	ISC_LIST_FOREACH(mctx->debuglist[idx], dl, link) {
@@ -402,11 +389,12 @@ mem_get(isc_mem_t *ctx, size_t size, int flags) {
 }
 
 static thread_local size_t freed_bytes = 0;
-static _Atomic(isc_stdtime_t) last_purge = 0;
 
 constexpr size_t purge_threshold = (16 * 1024 * 1024);
 
 #if defined(JEMALLOC_API_SUPPORTED) || defined(__GLIBC__)
+
+static _Atomic(isc_stdtime_t) last_purge = 0;
 
 static void
 mem_purge(void) {
@@ -436,7 +424,6 @@ mem_purge(void) {
 /*!
  * Perform a free, doing memory filling and overrun detection as necessary.
  */
-/* coverity[+free : arg-1] */
 static void
 mem_put(isc_mem_t *ctx, void *mem, size_t size, int flags) {
 	ADJUST_ZERO_ALLOCATION_SIZE(size);
@@ -502,12 +489,18 @@ debugging_enabled(const char *name) {
 
 void
 isc__mem_initialize(void) {
-/*
- * Check if the values copied from jemalloc still match
- */
-#ifdef JEMALLOC_API_SUPPORTED
-	RUNTIME_CHECK(ISC__MEM_ZERO == MALLOCX_ZERO);
+	/*
+	 * Check if the values copied from jemalloc still match; the
+	 * shim defines the MALLOCX_* macros too, so this holds on
+	 * every allocator path.
+	 */
+	RUNTIME_CHECK(ISC_MEM_ZERO == MALLOCX_ZERO);
+	RUNTIME_CHECK(ISC_MEM_ALIGN(sizeof(void *)) ==
+		      MALLOCX_ALIGN(sizeof(void *)));
+	RUNTIME_CHECK(ISC_MEM_ALIGN(ISC_OS_CACHELINE_SIZE) ==
+		      MALLOCX_ALIGN(ISC_OS_CACHELINE_SIZE));
 
+#ifdef JEMALLOC_API_SUPPORTED
 	/*
 	 * ignore errors — volumetric-based purge in mem_put handles the rest
 	 * regardless
@@ -604,7 +597,8 @@ mem_create(const char *name, isc_mem_t **ctxp, unsigned int debugging,
 	REQUIRE(ctxp != NULL && *ctxp == NULL);
 	REQUIRE(name != NULL);
 
-	ctx = mallocx(sizeof(*ctx), jemalloc_flags);
+	ctx = mallocx(sizeof(*ctx),
+		      jemalloc_flags | ISC_MEM_ALIGN(isc_os_cacheline()));
 	CHECK_OOM(ctx, sizeof(*ctx));
 
 	*ctx = (isc_mem_t){
@@ -620,7 +614,6 @@ mem_create(const char *name, isc_mem_t **ctxp, unsigned int debugging,
 
 	for (size_t i = 0; i < ARRAY_SIZE(ctx->stat_s); i++) {
 		atomic_init(&ctx->stat_s[i].inuse, 0);
-		atomic_init(&ctx->stat_s[i].is_overmem, false);
 	}
 
 	/* Reserve the [-1] index for ISC_TID_UNKNOWN */
@@ -677,7 +670,7 @@ mem_destroy(isc_mem_t *ctx) {
 				INSIST(!ctx->checkfree || dl->ptr == NULL);
 
 				ISC_LIST_UNLINK(ctx->debuglist[i], dl, link);
-				sdallocx(dl, sizeof(*dl), ctx->jemalloc_flags);
+				sdallocx(dl, dl->dlsize, ctx->jemalloc_flags);
 			}
 		}
 
@@ -700,7 +693,14 @@ mem_destroy(isc_mem_t *ctx) {
 
 	isc_mutex_destroy(&ctx->lock);
 
-	sdallocx(ctx, sizeof(*ctx), ctx->jemalloc_flags);
+#if ISC_MEM_TRACKLINES
+	if ((mem_debugging & ISC_MEM_DEBUGTRACE) != 0) {
+		fprintf(stderr, "destroyed mctx %p\n", ctx);
+	}
+#endif /* ISC_MEM_TRACKLINES */
+
+	sdallocx(ctx, sizeof(*ctx),
+		 ctx->jemalloc_flags | ISC_MEM_ALIGN(isc_os_cacheline()));
 }
 
 #if ISC_MEM_TRACE
@@ -862,19 +862,7 @@ isc__mem_reget(isc_mem_t *ctx, void *old_ptr, size_t old_size, size_t new_size,
 
 		ADJUST_ZERO_ALLOCATION_SIZE(new_size);
 
-#ifdef JEMALLOC_API_SUPPORTED
 		new_ptr = mem_realloc(ctx, old_ptr, new_size, flags);
-#else
-		new_ptr = mem_realloc(ctx, old_ptr, new_size,
-				      flags & ~ISC__MEM_ZERO);
-
-		if ((flags & ISC__MEM_ZERO) != 0) {
-			if (new_size > old_size) {
-				memset((uint8_t *)new_ptr + old_size, 0,
-				       new_size - old_size);
-			}
-		}
-#endif
 
 		mem_getstats(ctx, new_size);
 		ADD_TRACE(ctx, new_ptr, new_size, func, file, line);
@@ -954,27 +942,6 @@ isc__mem_strdup(isc_mem_t *mctx, const char *s FLARG) {
 	return ns;
 }
 
-char *
-isc__mem_strndup(isc_mem_t *mctx, const char *s, size_t size FLARG) {
-	size_t len;
-	char *ns = NULL;
-
-	REQUIRE(VALID_CONTEXT(mctx));
-	REQUIRE(s != NULL);
-	REQUIRE(size != 0);
-
-	len = strlen(s) + 1;
-	if (len > size) {
-		len = size;
-	}
-
-	ns = isc__mem_allocate(mctx, len, 0 FLARG_PASS);
-
-	strlcpy(ns, s, len);
-
-	return ns;
-}
-
 void
 isc_mem_setdestroycheck(isc_mem_t *ctx, bool flag) {
 	REQUIRE(VALID_CONTEXT(ctx));
@@ -1020,50 +987,30 @@ bool
 isc_mem_isovermem(isc_mem_t *ctx) {
 	REQUIRE(VALID_CONTEXT(ctx));
 
-	int32_t tid = isc_tid();
-
-	bool is_overmem = atomic_load_relaxed(&ctx->stat[tid].is_overmem);
-
-	if (!is_overmem) {
-		/* We are not overmem, check whether we should be? */
-		size_t hiwater = atomic_load_relaxed(&ctx->hi_water);
-		if (hiwater == 0) {
-			return false;
-		}
-
-		size_t inuse = isc_mem_inuse(ctx);
-		if (inuse <= hiwater) {
-			return false;
-		}
-
-		if ((ctx->debugging & ISC_MEM_DEBUGUSAGE) != 0) {
-			fprintf(stderr,
-				"overmem %s mctx %p inuse %zu hi_water %zu\n",
-				ctx->name, ctx, inuse, hiwater);
-		}
-
-		atomic_store_relaxed(&ctx->stat[tid].is_overmem, true);
-		return true;
-	} else {
-		/* We are overmem, check whether we should not be? */
-		size_t lowater = atomic_load_relaxed(&ctx->lo_water);
-		if (lowater == 0) {
-			return false;
-		}
-
-		size_t inuse = isc_mem_inuse(ctx);
-		if (inuse >= lowater) {
-			return true;
-		}
-
-		if ((ctx->debugging & ISC_MEM_DEBUGUSAGE) != 0) {
-			fprintf(stderr,
-				"overmem %s mctx %p inuse %zu lo_water %zu\n",
-				ctx->name, ctx, inuse, lowater);
-		}
-		atomic_store_relaxed(&ctx->stat[tid].is_overmem, false);
+	size_t hiwater = atomic_load_relaxed(&ctx->hi_water);
+	if (hiwater == 0) {
 		return false;
 	}
+
+	size_t inuse = isc_mem_inuse(ctx);
+	if (inuse >= hiwater) {
+		return true;
+	}
+
+	size_t lowater = atomic_load_relaxed(&ctx->lo_water);
+	if (inuse <= lowater) {
+		return false;
+	}
+
+	/*
+	 * Between lo_water and hi_water, return true with a probability
+	 * that ramps linearly from 0 at lo_water to 1 at hi_water.  This
+	 * spreads cache cleaning across many inserts instead of triggering
+	 * a thundering herd once the hi_water mark is crossed.
+	 */
+	uint32_t prob = (uint32_t)(((uint64_t)(inuse - lowater) * 256) /
+				   (hiwater - lowater));
+	return isc_random8() < prob;
 }
 
 const char *
@@ -1228,7 +1175,6 @@ isc__mempool_get(isc_mempool_t *restrict mpctx FLARG) {
 	return item;
 }
 
-/* coverity[+free : arg-1] */
 void
 isc__mempool_put(isc_mempool_t *restrict mpctx, void *mem FLARG) {
 	element *restrict item = NULL;

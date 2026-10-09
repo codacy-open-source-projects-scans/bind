@@ -23,14 +23,16 @@
 static isc_result_t
 fromtext_rrsig(ARGS_FROMTEXT) {
 	isc_token_t token;
-	unsigned char alg, c;
+	unsigned char alg, labels;
 	long i;
 	dns_rdatatype_t covered;
-	char *e;
+	char *e = NULL;
 	isc_result_t result;
 	isc_buffer_t buffer;
 	uint32_t time_signed, time_expire;
 	unsigned int used;
+	dns_fixedname_t fixed;
+	dns_name_t *signer = dns_fixedname_initname(&fixed);
 
 	REQUIRE(type == dns_rdatatype_rrsig);
 
@@ -72,8 +74,8 @@ fromtext_rrsig(ARGS_FROMTEXT) {
 	if (token.value.as_ulong > 0xffU) {
 		RETTOK(ISC_R_RANGE);
 	}
-	c = (unsigned char)token.value.as_ulong;
-	RETERR(mem_tobuffer(target, &c, 1));
+	labels = (unsigned char)token.value.as_ulong;
+	RETERR(mem_tobuffer(target, &labels, 1));
 
 	/*
 	 * Original ttl.
@@ -87,8 +89,8 @@ fromtext_rrsig(ARGS_FROMTEXT) {
 	 */
 	RETERR(isc_lex_getmastertoken(lexer, &token, isc_tokentype_string,
 				      false));
-	if (strlen(DNS_AS_STR(token)) <= 10U && *DNS_AS_STR(token) != '-' &&
-	    *DNS_AS_STR(token) != '+')
+	if (token.value.as_textregion.length <= 10U &&
+	    *DNS_AS_STR(token) != '-' && *DNS_AS_STR(token) != '+')
 	{
 		char *end;
 		unsigned long u;
@@ -103,7 +105,8 @@ fromtext_rrsig(ARGS_FROMTEXT) {
 		}
 		time_expire = u;
 	} else {
-		RETTOK(dns_time32_fromtext(DNS_AS_STR(token), &time_expire));
+		RETTOK(dns_time32_fromregion(token.value.as_textregion,
+					     &time_expire));
 	}
 	RETERR(uint32_tobuffer(time_expire, target));
 
@@ -112,8 +115,8 @@ fromtext_rrsig(ARGS_FROMTEXT) {
 	 */
 	RETERR(isc_lex_getmastertoken(lexer, &token, isc_tokentype_string,
 				      false));
-	if (strlen(DNS_AS_STR(token)) <= 10U && *DNS_AS_STR(token) != '-' &&
-	    *DNS_AS_STR(token) != '+')
+	if (token.value.as_textregion.length <= 10U &&
+	    *DNS_AS_STR(token) != '-' && *DNS_AS_STR(token) != '+')
 	{
 		char *end;
 		unsigned long u;
@@ -128,7 +131,8 @@ fromtext_rrsig(ARGS_FROMTEXT) {
 		}
 		time_signed = u;
 	} else {
-		RETTOK(dns_time32_fromtext(DNS_AS_STR(token), &time_signed));
+		RETTOK(dns_time32_fromregion(token.value.as_textregion,
+					     &time_signed));
 	}
 	RETERR(uint32_tobuffer(time_signed, target));
 
@@ -148,7 +152,16 @@ fromtext_rrsig(ARGS_FROMTEXT) {
 	if (origin == NULL) {
 		origin = dns_rootname;
 	}
-	RETTOK(dns_name_wirefromtext(&buffer, origin, options, target));
+	RETTOK(dns_name_fromtext(signer, &buffer, origin, options));
+
+	/*
+	 * (RRSIG labels doesn't include the root label, so add one
+	 * to normalize it before checking against the signer.)
+	 */
+	if ((labels + 1) < dns_name_countlabels(signer)) {
+		RETTOK(ISC_R_RANGE);
+	}
+	RETERR(mem_tobuffer(target, signer->ndata, signer->length));
 
 	/*
 	 * Sig.
@@ -295,6 +308,7 @@ fromwire_rrsig(ARGS_FROMWIRE) {
 	isc_region_t sr;
 	dns_name_t name;
 	unsigned char algorithm;
+	unsigned char labels;
 
 	REQUIRE(type == dns_rdatatype_rrsig);
 
@@ -318,6 +332,7 @@ fromwire_rrsig(ARGS_FROMWIRE) {
 	}
 
 	algorithm = sr.base[2];
+	labels = sr.base[3];
 
 	isc_buffer_forward(source, 18);
 	RETERR(mem_tobuffer(target, sr.base, 18));
@@ -327,6 +342,14 @@ fromwire_rrsig(ARGS_FROMWIRE) {
 	 */
 	dns_name_init(&name);
 	RETERR(dns_name_fromwire(&name, source, dctx, target));
+
+	/*
+	 * (RRSIG labels doesn't include the root label, so add one
+	 * to normalize it before checking against the signer.)
+	 */
+	if ((labels + 1) < dns_name_countlabels(&name)) {
+		RETERR(DNS_R_FORMERR);
+	}
 
 	/*
 	 * Sig.
@@ -479,7 +502,7 @@ fromstruct_rrsig(ARGS_FROMSTRUCT) {
 	/*
 	 * Signer name.
 	 */
-	RETERR(name_tobuffer(&sig->signer, target));
+	RETERR(name_tobuffer(dns_name(&sig->signer), target));
 
 	/*
 	 * Signature.
@@ -545,35 +568,16 @@ tostruct_rrsig(ARGS_TOSTRUCT) {
 
 	dns_name_init(&signer);
 	dns_name_fromregion(&signer, &sr);
-	dns_name_init(&sig->signer);
-	name_duporclone(&signer, mctx, &sig->signer);
-	isc_region_consume(&sr, name_length(&sig->signer));
+	dns_linkedname_init(&sig->signer);
+	dns_name_clone(&signer, dns_name(&sig->signer));
+	isc_region_consume(&sr, name_length(dns_name(&sig->signer)));
 
 	/*
 	 * Signature.
 	 */
 	sig->siglen = sr.length;
-	sig->signature = mem_maybedup(mctx, sr.base, sig->siglen);
-	sig->mctx = mctx;
+	sig->signature = sr.base;
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_rrsig(ARGS_FREESTRUCT) {
-	dns_rdata_rrsig_t *sig = (dns_rdata_rrsig_t *)source;
-
-	REQUIRE(sig != NULL);
-	REQUIRE(sig->common.rdtype == dns_rdatatype_rrsig);
-
-	if (sig->mctx == NULL) {
-		return;
-	}
-
-	dns_name_free(&sig->signer, sig->mctx);
-	if (sig->signature != NULL) {
-		isc_mem_free(sig->mctx, sig->signature);
-	}
-	sig->mctx = NULL;
 }
 
 static isc_result_t

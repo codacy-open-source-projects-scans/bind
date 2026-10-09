@@ -75,12 +75,20 @@ cancel:
 		return;
 	} else if (result != ISC_R_SHUTTINGDOWN) {
 		char namebuf[DNS_NAME_FORMATSIZE];
-		char typebuf[DNS_RDATATYPE_FORMATSIZE];
-		dns_name_format(fetch->qname, namebuf, sizeof(namebuf));
-		dns_rdatatype_format(fetch->qtype, typebuf, sizeof(typebuf));
-		dns_zone_log(zone, ISC_LOG_WARNING,
-			     "Failed fetch for %s/%s request", namebuf,
-			     typebuf);
+
+		if (DNS_NAME_VALID(fetch->qname)) {
+			char typebuf[DNS_RDATATYPE_FORMATSIZE];
+			dns_name_format(fetch->qname, namebuf, sizeof(namebuf));
+			dns_rdatatype_format(fetch->qtype, typebuf,
+					     sizeof(typebuf));
+			dns_zone_log(zone, ISC_LOG_WARNING,
+				     "Failed fetch for %s/%s request", namebuf,
+				     typebuf);
+		} else {
+			dns_zone_nameonly(zone, namebuf, sizeof(namebuf));
+			dns_zone_log(zone, ISC_LOG_WARNING,
+				     "Failed fetch for zone %s", namebuf);
+		}
 	}
 
 	/*
@@ -88,7 +96,7 @@ cancel:
 	 */
 	dns__zone_lock(zone);
 
-	dns_name_t *zname = dns_fixedname_name(&fetch->name);
+	dns_name_t *zname = dns_name(&fetch->name);
 	isc_mem_t *mctx = dns_zone_getmctx(zone);
 	bool free_needed;
 
@@ -128,7 +136,7 @@ dns_zonefetch_done(void *arg) {
 
 	mctx = fetch->mctx;
 	zone = fetch->zone;
-	zname = dns_fixedname_name(&fetch->name);
+	zname = dns_name(&fetch->name);
 	rrset = &fetch->rrset;
 	sigset = &fetch->sigset;
 	view = dns_zone_getview(zone);

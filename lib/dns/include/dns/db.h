@@ -80,7 +80,6 @@ typedef struct dns_dbnode_methods {
 			   dns_dbnode_t **targetp DNS__DB_FLARG);
 	void (*detachnode)(dns_dbnode_t **targetp DNS__DB_FLARG);
 
-	void (*deletedata)(dns_dbnode_t *node, void *data);
 	void (*expiredata)(dns_dbnode_t *node, void *data);
 } dns_dbnode_methods_t;
 
@@ -153,7 +152,7 @@ typedef struct dns_db_methods {
 	isc_result_t (*find)(dns_db_t *db, const dns_name_t *name,
 			     dns_dbversion_t *version, dns_rdatatype_t type,
 			     unsigned int options, isc_stdtime_t now,
-			     dns_dbnode_t **nodep, dns_name_t *foundname,
+			     dns_name_t			*foundname,
 			     dns_clientinfomethods_t	*methods,
 			     dns_clientinfo_t		*clientinfo,
 			     dns_rdataset_t		*rdataset,
@@ -168,7 +167,8 @@ typedef struct dns_db_methods {
 	isc_result_t (*setgluecachestats)(dns_db_t *db, isc_stats_t *stats);
 	void (*addglue)(dns_db_t *db, dns_dbversion_t *version,
 			const dns_name_t *owner_name, dns_rdataset_t *rdataset,
-			dns_message_t *msg);
+			dns_message_t *msg, dns_clientinfomethods_t *methods,
+			dns_clientinfo_t *clientinfo);
 	void (*setmaxrrperset)(dns_db_t *db, uint32_t value);
 	void (*setmaxtypepername)(dns_db_t *db, uint32_t value);
 	isc_result_t (*getzoneversion)(dns_db_t *db, isc_buffer_t *b);
@@ -256,39 +256,42 @@ enum {
 	DNS_DBFIND_FORCENSEC3 = 1 << 5,
 	DNS_DBFIND_ADDITIONALOK = 1 << 6,
 	DNS_DBFIND_NOZONECUT = 1 << 7,
+	DNS_DBFIND_HINTOK = 1 << 8,
+
+	/*
+	 * DNS_DBFIND_STALEOK: This flag is set when BIND fails to refresh
+	 * a RRset due to timeout (resolver-query-timeout). Its intent is
+	 * to try to look for stale data in cache as a fallback, but only
+	 * if stale answers are enabled in configuration.
+	 */
+	DNS_DBFIND_STALEOK = 1 << 9,
+
+	/*
+	 * DNS_DBFIND_STALEENABLED: This flag is used as a hint to the
+	 * database that it may use stale data. It is always set during
+	 * query lookup if stale answers are enabled, but only effectively
+	 * used during stale-refresh-time window. Also during this window,
+	 * the resolver will not try to resolve the query, in other words
+	 * no attempt to refresh the data in cache is made when the
+	 * stale-refresh-time window is active.
+	 */
+	DNS_DBFIND_STALEENABLED = 1 << 10,
+
+	/*
+	 * DNS_DBFIND_STALETIMEOUT: This flag is used when we want stale
+	 * data from the database, but not due to a failure in resolution,
+	 * it also doesn't require stale-refresh-time window timer to be
+	 * active. As long as there is stale data available, it should be
+	 * returned.
+	 */
+	DNS_DBFIND_STALETIMEOUT = 1 << 11,
+
+	/*
+	 * DNS_DBFIND_STALESTART: This flag is used to activate
+	 * stale-refresh-time window.
+	 */
+	DNS_DBFIND_STALESTART = 1 << 12,
 };
-
-/*
- * DNS_DBFIND_STALEOK: This flag is set when BIND fails to refresh a RRset due
- * to timeout (resolver-query-timeout). Its intent is to try to look for stale
- * data in cache as a fallback, but only if stale answers are enabled in
- * configuration.
- */
-#define DNS_DBFIND_STALEOK 0x0400
-
-/*
- * DNS_DBFIND_STALEENABLED: This flag is used as a hint to the database that
- * it may use stale data. It is always set during query lookup if stale
- * answers are enabled, but only effectively used during stale-refresh-time
- * window. Also during this window, the resolver will not try to resolve the
- * query, in other words no attempt to refresh the data in cache is made when
- * the stale-refresh-time window is active.
- */
-#define DNS_DBFIND_STALEENABLED 0x0800
-
-/*
- * DNS_DBFIND_STALETIMEOUT: This flag is used when we want stale data from the
- * database, but not due to a failure in resolution, it also doesn't require
- * stale-refresh-time window timer to be active. As long as there is stale
- * data available, it should be returned.
- */
-#define DNS_DBFIND_STALETIMEOUT 0x1000
-
-/*
- * DNS_DBFIND_STALESTART: This flag is used to activate stale-refresh-time
- * window.
- */
-#define DNS_DBFIND_STALESTART 0x2000
 /*@}*/
 
 /*@{*/
@@ -677,7 +680,7 @@ dns_db_currentversion(dns_db_t *db, dns_dbversion_t **versionp);
  *
  * \li	'db' is a valid database with zone semantics.
  *
- * \li	versionp != NULL && *verisonp == NULL
+ * \li	versionp != NULL && *versionp == NULL
  *
  * Ensures:
  *
@@ -694,7 +697,7 @@ dns_db_newversion(dns_db_t *db, dns_dbversion_t **versionp);
  *
  * \li	'db' is a valid database with zone semantics.
  *
- * \li	versionp != NULL && *verisonp == NULL
+ * \li	versionp != NULL && *versionp == NULL
  *
  * Ensures:
  *
@@ -764,11 +767,12 @@ dns__db_closeversion(dns_db_t *db, dns_dbversion_t **versionp,
  *** Node Methods
  ***/
 
-#define dns_db_findnode(db, name, create, nodep) \
-	dns__db_findnode(db, name, create, NULL, NULL, nodep DNS__DB_FILELINE)
-#define dns_db_findnodeext(db, name, create, methods, clientinfo, nodep) \
-	dns__db_findnode(db, name, create, methods, clientinfo,          \
+#define dns_db_findnode(db, name, create, nodep)                         \
+	dns__db_findnode(db, DNS_NAME__RO_ARG(name), create, NULL, NULL, \
 			 nodep DNS__DB_FILELINE)
+#define dns_db_findnodeext(db, name, create, methods, clientinfo, nodep) \
+	dns__db_findnode(db, DNS_NAME__RO_ARG(name), create, methods,    \
+			 clientinfo, nodep DNS__DB_FILELINE)
 isc_result_t
 dns__db_findnode(dns_db_t *db, const dns_name_t *name, bool create,
 		 dns_clientinfomethods_t *methods, dns_clientinfo_t *clientinfo,
@@ -811,21 +815,21 @@ dns__db_findnode(dns_db_t *db, const dns_name_t *name, bool create,
  *	implementation used.
  */
 
-#define dns_db_find(db, name, version, type, options, now, nodep, foundname,  \
+#define dns_db_find(db, name, version, type, options, now, foundname,         \
 		    rdataset, sigrdataset)                                    \
-	dns__db_find(db, name, version, type, options, now, nodep, foundname, \
-		     NULL, NULL, rdataset, sigrdataset DNS__DB_FILELINE)
-#define dns_db_findext(db, name, version, type, options, now, nodep,          \
-		       foundname, methods, clientinfo, rdataset, sigrdataset) \
-	dns__db_find(db, name, version, type, options, now, nodep, foundname, \
-		     methods, clientinfo, rdataset,                           \
+	dns__db_find(db, DNS_NAME__RO_ARG(name), version, type, options, now, \
+		     foundname, NULL, NULL, rdataset,                         \
+		     sigrdataset DNS__DB_FILELINE)
+#define dns_db_findext(db, name, version, type, options, now, foundname,      \
+		       methods, clientinfo, rdataset, sigrdataset)            \
+	dns__db_find(db, DNS_NAME__RO_ARG(name), version, type, options, now, \
+		     foundname, methods, clientinfo, rdataset,                \
 		     sigrdataset DNS__DB_FILELINE)
 isc_result_t
 dns__db_find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
 	     dns_rdatatype_t type, unsigned int options, isc_stdtime_t now,
-	     dns_dbnode_t **nodep, dns_name_t *foundname,
-	     dns_clientinfomethods_t *methods, dns_clientinfo_t *clientinfo,
-	     dns_rdataset_t		*rdataset,
+	     dns_name_t *foundname, dns_clientinfomethods_t *methods,
+	     dns_clientinfo_t *clientinfo, dns_rdataset_t *rdataset,
 	     dns_rdataset_t *sigrdataset DNS__DB_FLARG);
 /*%<
  * Find the best match for 'name' and 'type' in version 'version' of 'db'.
@@ -893,16 +897,12 @@ dns__db_find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
  *
  * \li	'type' is not SIG, or a meta-RR type other than 'ANY' (e.g. 'OPT').
  *
- * \li	'nodep' is NULL, or nodep is a valid pointer and *nodep == NULL.
- *
  * \li	'foundname' is a valid name with a dedicated buffer.
  *
  * \li	'rdataset' is NULL, or is a valid unassociated rdataset.
  *
  * Ensures,
  *	on a non-error completion:
- *
- *	\li	If nodep != NULL, then it is bound to the found node.
  *
  *	\li	If foundname != NULL, then it contains the full name of the
  *		found node.
@@ -1139,9 +1139,9 @@ dns__db_findrdataset(dns_db_t *db, dns_dbnode_t *node, dns_dbversion_t *version,
  * \li	If 'version' is NULL, then the current version will be used.
  *
  * \li	Care must be used when using this routine to build a DNS response:
- *	'node' should have been found with dns_db_find(), not
- *	dns_db_findnode().  No glue checking is done.  No checking for
- *	pending data is done.
+ *	'node' should correspond to an owner name already found with
+ *	dns_db_find().  No glue checking is done.  No checking for pending
+ *	data is done.
  *
  * \li	The 'now' field is ignored if 'db' is a zone database.  If 'db' is a
  *	cache database, an rdataset will not be found unless it expires after
@@ -1243,8 +1243,9 @@ dns__db_addrdataset(dns_db_t *db, dns_dbnode_t *node, dns_dbversion_t *version,
  *	existing rdataset of the same type.  If not merging and the
  *	#DNS_DBADD_FORCE option is set, then the data will update the database
  *	without regard to trust levels.  If not forcing the data, then the
- *	rdataset will only be added if its trust level is >= the trust level of
- *	any existing rdataset.  Forcing is only meaningful for cache databases.
+ *	rdataset will only be added if its trust level is >= the trust level
+ *	of any existing active (not expired) rdataset of the same type.
+ *	Forcing is only meaningful for cache databases.
  *	If #DNS_DBADD_EXACT is set then there must be no rdata in common between
  *	the old and new rdata sets.  If #DNS_DBADD_EXACTTTL is set then both
  *	the old and new rdata sets must have the same ttl.
@@ -1252,6 +1253,11 @@ dns__db_addrdataset(dns_db_t *db, dns_dbnode_t *node, dns_dbversion_t *version,
  * \li  If the #DNS_DBADD_EQUALOK option is set, and the database is not
  *      changed, compare the old and new rdatasets; if they are equal,
  *      return #ISC_R_SUCCESS instead of #DNS_R_UNCHANGED.
+ *
+ * \li	If the #DNS_DBADD_PREFETCH option is set, the rdataset is being
+ *	added as the result of a prefetch.  In a cache database this allows
+ *	equal but less trusted data to refresh the TTL of existing address
+ *	(A/AAAA) and DS records, which would otherwise be kept unchanged.
  *
  * \li	The 'now' field is ignored if 'db' is a zone database.  If 'db' is
  *	a cache database, then the added rdataset will expire no later than
@@ -1354,9 +1360,10 @@ dns__db_deleterdataset(dns_db_t *db, dns_dbnode_t *node,
  *
  * Notes:
  *
- * \li	If 'type' is dns_rdatatype_any, then no rdatasets will exist in
- *	'version' (provided that the dns_db_deleterdataset() isn't followed
- *	by one or more dns_db_addrdataset() calls).
+ * \li	In a cache database, a negative cache entry is stored under the
+ *	type whose nonexistence it proves (dns_rdatatype_any for NXDOMAIN
+ *	and NODATA(QTYPE=ANY) entries), so deleting 'type' removes the
+ *	cache entry for that type whether it is positive or negative.
  *
  * Requires:
  *
@@ -1368,16 +1375,16 @@ dns__db_deleterdataset(dns_db_t *db, dns_dbnode_t *node,
  *	read-write version, or the database has cache semantics
  *	and version is NULL.
  *
- * \li	'type' is not a meta-RR type, except for dns_rdatatype_any, which is
- *	allowed.
- *
- * \li	If 'covers' != 0, 'type' must be SIG.
+ * \li	If 'covers' != 0, 'type' must be RRSIG or dns_rdatatype_none.
  *
  * Returns:
  *
  * \li	#ISC_R_SUCCESS
- * \li	#DNS_R_UNCHANGED			No rdatasets of 'type' existed
- * before the operation was attempted.
+ * \li	#DNS_R_UNCHANGED	No rdatasets of 'type' existed before
+ *				the operation was attempted.
+ * \li	#ISC_R_NOTIMPLEMENTED	'type' is dns_rdatatype_any; or the
+ *				database has zone semantics and 'type'
+ *				is RRSIG with 'covers' == 0.
  *
  * \li	Other results are possible, depending upon the database
  *	implementation used.
@@ -1540,8 +1547,9 @@ dns_db_getsize(dns_db_t *db, dns_dbversion_t *version, uint64_t *records,
  * \li	#ISC_R_NOTIMPLEMENTED
  */
 
-#define dns_db_findnsec3node(db, name, create, nodep) \
-	dns__db_findnsec3node(db, name, create, nodep DNS__DB_FILELINE)
+#define dns_db_findnsec3node(db, name, create, nodep)             \
+	dns__db_findnsec3node(db, DNS_NAME__RO_ARG(name), create, \
+			      nodep DNS__DB_FILELINE)
 isc_result_t
 dns__db_findnsec3node(dns_db_t *db, const dns_name_t *name, bool create,
 		      dns_dbnode_t **nodep DNS__DB_FLARG);
@@ -1743,10 +1751,11 @@ dns_db_setgluecachestats(dns_db_t *db, isc_stats_t *stats);
  *	dns_rdatasetstats_create(); otherwise NULL.
  */
 
-isc_result_t
+void
 dns_db_addglue(dns_db_t *db, dns_dbversion_t *version,
 	       const dns_name_t *owner_name, dns_rdataset_t *rdataset,
-	       dns_message_t *msg);
+	       dns_message_t *msg, dns_clientinfomethods_t *methods,
+	       dns_clientinfo_t *clientinfo);
 /*%<
  * Add glue records for rdataset to the additional section of message in
  * 'msg'. 'rdataset' must be of type NS.
@@ -1757,12 +1766,8 @@ dns_db_addglue(dns_db_t *db, dns_dbversion_t *version,
  * \li	'owner_name' name of the rdataset.
  * \li	'rdataset' is a valid NS rdataset.
  * \li	'msg' is the DNS message to which the glue should be added.
- *
- * Returns:
- *\li	#ISC_R_SUCCESS
- *\li	#ISC_R_NOTIMPLEMENTED
- *\li	#ISC_R_FAILURE
- *\li	Any error that dns_rdata_additionaldata() can return.
+ * \li	'methods' and 'clientinfo', if non-NULL, provide client context for
+ *	database lookups used to find glue.
  */
 
 void
@@ -1770,14 +1775,6 @@ dns_db_expiredata(dns_dbnode_t *node, void *data);
 /*%<
  * Tell the database 'db' to mark a block of data 'data' stored at
  * node 'node' as expired.
- */
-
-void
-dns_db_deletedata(dns_dbnode_t *node, void *data);
-/*%<
- * Tell the database to prepare to delete the block of data 'data'
- * stored at node 'node. This may include, for example, removing the
- * data from an LRU list or a heap.
  */
 
 void

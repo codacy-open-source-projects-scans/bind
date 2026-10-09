@@ -3,30 +3,16 @@
 {% set long_sigs = long_sigs  | default(False) %}
 
 options {
-	query-source address 10.53.0.3;
-	notify-source 10.53.0.3;
-	transfer-source 10.53.0.3;
-	port @PORT@;
-	pid-file "named.pid";
-	listen-on { 10.53.0.3; };
-	listen-on-v6 { none; };
+	{% include_indented "_common/options.conf.j2" %}
 	allow-transfer { any; };
 	minimal-any no;
 	minimal-responses yes;
 	recursion no;
-	notify yes;
 	dnssec-validation yes;
 	session-keyfile "session.key";
 };
 
-key rndc_key {
-	secret "1234abcd8765";
-	algorithm @DEFAULT_HMAC@;
-};
-
-controls {
-	inet 10.53.0.3 port @CONTROLPORT@ allow { any; } keys { rndc_key; };
-};
+{% include "_common/controls.conf.j2" %}
 
 dnssec-policy "dnssec" {
 	keys {
@@ -64,10 +50,7 @@ dnssec-policy "autonsec3" {
 	nsec3param iterations 0 optout no salt-length 0;
 };
 
-zone "." {
-	type hint;
-	file "../../_common/root.hint";
-};
+{% include "_common/root.hint.conf" %}
 
 zone "example" {
 	type secondary;
@@ -99,6 +82,21 @@ zone "bogus.example" {
 	allow-update { any; };
 };
 
+zone "keytrap.example" {
+	type primary;
+	file "keytrap.example.db.signed";
+};
+
+zone "keytrap2.example" {
+	type primary;
+	file "keytrap2.example.db.signed";
+};
+
+zone "keytrap3.example" {
+	type primary;
+	file "keytrap3.example.db.signed";
+};
+
 zone "badds.example" {
 	type primary;
 	file "badds.example.db.signed";
@@ -115,6 +113,7 @@ zone "dynamic.example" {
 	type primary;
 	file "dynamic.example.db.signed";
 	allow-update { any; };
+	max-records-per-type 3;
 };
 
 zone "insecure.example" {
@@ -207,6 +206,12 @@ zone "optout-unknown.example" {
 zone "dnskey-unknown.example" {
 	type primary;
 	file "dnskey-unknown.example.db.signed";
+};
+
+# Uses HMAC-SHA256 code point
+zone "dnskey-163-unknown.example" {
+	type primary;
+	file "dnskey-163-unknown.example.db.signed";
 };
 
 zone "digest-alg-unsupported.example" {
@@ -324,7 +329,6 @@ zone "nsec3chain-test" {
 
 zone "expiring.example" {
 	type primary;
-	allow-update { any; };
 	file "expiring.example.db.signed";
 };
 
@@ -438,18 +442,18 @@ zone "rsasha1-1024.example" {
 };
 
 zone "rsasha256oid.example" {
-        type primary;
-        file "rsasha256oid.example.db.signed";
+	type primary;
+	file "rsasha256oid.example.db.signed";
 };
 
 zone "rsasha512oid.example" {
-        type primary;
-        file "rsasha512oid.example.db.signed";
+	type primary;
+	file "rsasha512oid.example.db.signed";
 };
 
 zone "unknownoid.example" {
-        type primary;
-        file "unknownoid.example.db.signed";
+	type primary;
+	file "unknownoid.example.db.signed";
 };
 
 zone "target.peer-ns-spoof" {
@@ -458,18 +462,18 @@ zone "target.peer-ns-spoof" {
 };
 
 zone "extradsoid.example" {
-        type primary;
-        file "extradsoid.example.db.signed";
+	type primary;
+	file "extradsoid.example.db.signed";
 };
 
 zone "extradsunknownoid.example" {
-        type primary;
-        file "extradsunknownoid.example.db.signed";
+	type primary;
+	file "extradsunknownoid.example.db.signed";
 };
 
 zone "extended-ds-unknown-oid.example" {
-        type primary;
-        file "extended-ds-unknown-oid.example.db.signed";
+	type primary;
+	file "extended-ds-unknown-oid.example.db.signed";
 };
 
 dnssec-policy "siginterval" {

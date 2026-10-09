@@ -64,15 +64,31 @@ copy_rdataset(dns_rdataset_t *rdataset, isc_buffer_t *buffer) {
 		return ISC_R_NOSPACE;
 	}
 	count = dns_rdataset_count(rdataset);
+
+	/*
+	 * Reject duplicate singleton records.
+	 */
+	if (dns_rdatatype_issingleton(rdataset->type) && count != 1) {
+		return DNS_R_TOOMANYRECORDS;
+	}
+
 	INSIST(count <= 65535);
 	isc_buffer_putuint16(buffer, (uint16_t)count);
+
+	if (ar.length < 2 + count * 2) {
+		/*
+		 * The count took 2 bytes and each rdata needs at least 2
+		 * more for its length.  Bail early if that cannot fit.
+		 */
+		return ISC_R_NOSPACE;
+	}
 
 	DNS_RDATASET_FOREACH(rdataset) {
 		dns_rdata_t rdata = DNS_RDATA_INIT;
 		dns_rdataset_current(rdataset, &rdata);
 
 		dns_rdata_toregion(&rdata, &r);
-		INSIST(r.length <= 65535);
+		INSIST(r.length <= DNS_RDATA_MAXLENGTH);
 		isc_buffer_availableregion(buffer, &ar);
 		if (ar.length < 2) {
 			return ISC_R_NOSPACE;
@@ -81,6 +97,7 @@ copy_rdataset(dns_rdataset_t *rdataset, isc_buffer_t *buffer) {
 		 * Copy the rdata length to the buffer.
 		 */
 		isc_buffer_putuint16(buffer, (uint16_t)r.length);
+
 		/*
 		 * Copy the rdata to the buffer.
 		 */
@@ -92,7 +109,7 @@ copy_rdataset(dns_rdataset_t *rdataset, isc_buffer_t *buffer) {
 
 isc_result_t
 dns_ncache_add(dns_message_t *message, dns_db_t *cache, dns_dbnode_t *node,
-	       dns_rdatatype_t covers, isc_stdtime_t now, dns_ttl_t minttl,
+	       dns_rdatatype_t rdtype, isc_stdtime_t now, dns_ttl_t minttl,
 	       dns_ttl_t maxttl, bool optout, bool secure,
 	       dns_rdataset_t *addedrdataset) {
 	isc_buffer_t buffer;
@@ -103,9 +120,9 @@ dns_ncache_add(dns_message_t *message, dns_db_t *cache, dns_dbnode_t *node,
 	dns_rdata_t rdata[DNS_NCACHE_RDATA];
 	dns_rdataset_t ncrdataset;
 	dns_rdatalist_t ncrdatalist;
-	unsigned char data[65536];
+	unsigned char data[UINT16_MAX];
 	unsigned int next = 0;
-	isc_result_t result;
+	bool seen_soa = false;
 
 	/*
 	 * Convert the authority data from 'message' into a negative cache
@@ -127,7 +144,8 @@ dns_ncache_add(dns_message_t *message, dns_db_t *cache, dns_dbnode_t *node,
 	 */
 	dns_rdatalist_init(&ncrdatalist);
 	ncrdatalist.rdclass = dns_db_class(cache);
-	ncrdatalist.covers = covers;
+	ncrdatalist.type = rdtype;
+	ncrdatalist.covers = dns_rdatatype_none;
 	ncrdatalist.ttl = maxttl;
 
 	/*
@@ -138,12 +156,26 @@ dns_ncache_add(dns_message_t *message, dns_db_t *cache, dns_dbnode_t *node,
 	isc_buffer_init(&buffer, data, sizeof(data));
 
 	MSG_SECTION_FOREACH(message, DNS_SECTION_AUTHORITY, name) {
-		if (name->attributes.ncache) {
+		if (dns_linkedname_attrs(name)->ncache) {
 			ISC_LIST_FOREACH(name->list, rdataset, link) {
 				if (!rdataset->attributes.ncache) {
 					continue;
 				}
 				type = rdataset->type;
+
+				/*
+				 * A negative response carries one SOA
+				 * RRset.  The resolver rejects a second
+				 * one before it gets here; don't rely on
+				 * that.
+				 */
+				if (type == dns_rdatatype_soa) {
+					if (seen_soa) {
+						return DNS_R_TOOMANYRECORDS;
+					}
+					seen_soa = true;
+				}
+
 				if (type == dns_rdatatype_rrsig) {
 					type = rdataset->covers;
 				}
@@ -184,10 +216,20 @@ dns_ncache_add(dns_message_t *message, dns_db_t *cache, dns_dbnode_t *node,
 							     &buffer));
 
 					if (next >= DNS_NCACHE_RDATA) {
-						return ISC_R_NOSPACE;
+						return DNS_R_TOOMANYRECORDS;
 					}
 					dns_rdata_init(&rdata[next]);
 					isc_buffer_remainingregion(&buffer, &r);
+					/*
+					 * dns_rdata_t.length is 16 bits wide,
+					 * so a longer record would be silently
+					 * truncated here and would then pass
+					 * the size checks in
+					 * dns_rdataslab_fromrdataset().
+					 */
+					if (r.length > DNS_RDATA_MAXLENGTH) {
+						return ISC_R_NOSPACE;
+					}
 					rdata[next].data = r.base;
 					rdata[next].length = r.length;
 					rdata[next].rdclass =
@@ -236,13 +278,8 @@ dns_ncache_add(dns_message_t *message, dns_db_t *cache, dns_dbnode_t *node,
 		ncrdataset.attributes.optout = true;
 	}
 
-	result = dns_db_addrdataset(cache, node, NULL, now, &ncrdataset, 0,
-				    addedrdataset);
-	if (result != ISC_R_SUCCESS && result != DNS_R_UNCHANGED) {
-		return result;
-	}
-
-	return ISC_R_SUCCESS;
+	return dns_db_addrdataset(cache, node, NULL, now, &ncrdataset, 0,
+				  addedrdataset);
 }
 
 isc_result_t
@@ -263,7 +300,8 @@ dns_ncache_towire(dns_rdataset_t *rdataset, dns_compress_t *cctx,
 	 */
 
 	REQUIRE(rdataset != NULL);
-	REQUIRE(rdataset->type == dns_rdatatype_none);
+	REQUIRE(rdataset->type != dns_rdatatype_none);
+	REQUIRE(rdataset->covers == dns_rdatatype_none);
 	REQUIRE(rdataset->attributes.negative);
 
 	savedbuffer = *target;
@@ -480,7 +518,8 @@ dns_ncache_getrdataset(dns_rdataset_t *ncacherdataset, dns_name_t *name,
 
 	REQUIRE(ncacherdataset != NULL);
 	REQUIRE(DNS_RDATASET_VALID(ncacherdataset));
-	REQUIRE(ncacherdataset->type == dns_rdatatype_none);
+	REQUIRE(ncacherdataset->type != dns_rdatatype_none);
+	REQUIRE(ncacherdataset->covers == dns_rdatatype_none);
 	REQUIRE(ncacherdataset->attributes.negative);
 	REQUIRE(name != NULL);
 	REQUIRE(!dns_rdataset_isassociated(rdataset));
@@ -546,7 +585,8 @@ dns_ncache_getsigrdataset(dns_rdataset_t *ncacherdataset, dns_name_t *name,
 	unsigned int count;
 
 	REQUIRE(ncacherdataset != NULL);
-	REQUIRE(ncacherdataset->type == dns_rdatatype_none);
+	REQUIRE(ncacherdataset->type != dns_rdatatype_none);
+	REQUIRE(ncacherdataset->covers == dns_rdatatype_none);
 	REQUIRE(ncacherdataset->attributes.negative);
 	REQUIRE(name != NULL);
 	REQUIRE(!dns_rdataset_isassociated(rdataset));
@@ -591,7 +631,7 @@ dns_ncache_getsigrdataset(dns_rdataset_t *ncacherdataset, dns_name_t *name,
 		dns_rdata_reset(&rdata);
 		dns_rdata_fromregion(&rdata, rdataset->rdclass,
 				     dns_rdatatype_rrsig, &sigregion);
-		(void)dns_rdata_tostruct(&rdata, &rrsig, NULL);
+		(void)dns_rdata_tostruct(&rdata, &rrsig);
 		if (rrsig.covered == covers) {
 			isc_buffer_remainingregion(&source, &remaining);
 			result = ISC_R_SUCCESS;
@@ -631,7 +671,8 @@ dns_ncache_current(dns_rdataset_t *ncacherdataset, dns_name_t *found,
 	unsigned char *raw;
 
 	REQUIRE(ncacherdataset != NULL);
-	REQUIRE(ncacherdataset->type == dns_rdatatype_none);
+	REQUIRE(ncacherdataset->type != dns_rdatatype_none);
+	REQUIRE(ncacherdataset->covers == dns_rdatatype_none);
 	REQUIRE(ncacherdataset->attributes.negative);
 	REQUIRE(found != NULL);
 	REQUIRE(!dns_rdataset_isassociated(rdataset));
@@ -667,7 +708,7 @@ dns_ncache_current(dns_rdataset_t *ncacherdataset, dns_name_t *found,
 		dns_rdata_reset(&rdata);
 		dns_rdata_fromregion(&rdata, ncacherdataset->rdclass, type,
 				     &sigregion);
-		(void)dns_rdata_tostruct(&rdata, &rrsig, NULL);
+		(void)dns_rdata_tostruct(&rdata, &rrsig);
 		covers = rrsig.covered;
 	} else {
 		covers = dns_rdatatype_none;

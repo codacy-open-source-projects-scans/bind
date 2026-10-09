@@ -53,14 +53,16 @@
 #define CHECK_LOCAL 1
 #endif /* ifndef CHECK_LOCAL */
 
-#define ERR_IS_CNAME	   1
-#define ERR_NO_ADDRESSES   2
-#define ERR_LOOKUP_FAILURE 3
-#define ERR_EXTRA_A	   4
-#define ERR_EXTRA_AAAA	   5
-#define ERR_MISSING_GLUE   5
-#define ERR_IS_MXCNAME	   6
-#define ERR_IS_SRVCNAME	   7
+enum {
+	ERR_IS_CNAME = 1,
+	ERR_NO_ADDRESSES,
+	ERR_LOOKUP_FAILURE,
+	ERR_EXTRA_A,
+	ERR_EXTRA_AAAA,
+	ERR_MISSING_GLUE,
+	ERR_IS_MXCNAME,
+	ERR_IS_SRVCNAME,
+};
 
 static const char *dbtype[] = { ZONEDB_DEFAULT };
 
@@ -76,6 +78,7 @@ bool docheckmx = false;
 bool dochecksrv = false;
 bool docheckns = false;
 #endif /* if CHECK_LOCAL */
+bool docheckrpz = false;
 dns_zoneopt_t zone_options = DNS_ZONEOPT_CHECKNS | DNS_ZONEOPT_CHECKMX |
 			     DNS_ZONEOPT_CHECKDUPRR | DNS_ZONEOPT_CHECKSPF |
 			     DNS_ZONEOPT_MANYERRORS | DNS_ZONEOPT_CHECKNAMES |
@@ -154,7 +157,7 @@ checkisservedby(dns_zone_t *zone, dns_rdatatype_t type,
 	/*
 	 * Turn off search.
 	 */
-	if (dns_name_countlabels(name) > 1U) {
+	if (dns_name_belowroot(name)) {
 		strlcat(namebuf, ".", sizeof(namebuf));
 	}
 	eai = getaddrinfo(namebuf, NULL, &hints, &ai);
@@ -241,7 +244,7 @@ checkns(dns_zone_t *zone, const dns_name_t *name, const dns_name_t *owner,
 	/*
 	 * Turn off search.
 	 */
-	if (dns_name_countlabels(name) > 1U) {
+	if (dns_name_belowroot(name)) {
 		strlcat(namebuf, ".", sizeof(namebuf));
 	}
 	dns_name_format(owner, ownerbuf, sizeof(ownerbuf));
@@ -442,7 +445,7 @@ checkmx(dns_zone_t *zone, const dns_name_t *name, const dns_name_t *owner) {
 	/*
 	 * Turn off search.
 	 */
-	if (dns_name_countlabels(name) > 1U) {
+	if (dns_name_belowroot(name)) {
 		strlcat(namebuf, ".", sizeof(namebuf));
 	}
 	dns_name_format(owner, ownerbuf, sizeof(ownerbuf));
@@ -531,7 +534,7 @@ checksrv(dns_zone_t *zone, const dns_name_t *name, const dns_name_t *owner) {
 	/*
 	 * Turn off search.
 	 */
-	if (dns_name_countlabels(name) > 1U) {
+	if (dns_name_belowroot(name)) {
 		strlcat(namebuf, ".", sizeof(namebuf));
 	}
 	dns_name_format(owner, ownerbuf, sizeof(ownerbuf));
@@ -663,18 +666,26 @@ load_zone(isc_mem_t *mctx, const char *zonename, const char *filename,
 
 	dns_zone_setmaxttl(zone, maxttl);
 
-	if (docheckmx) {
-		dns_zone_setcheckmx(zone, checkmx);
-	}
-	if (docheckns) {
-		dns_zone_setcheckns(zone, checkns);
-		dns_zone_setcheckisservedby(zone, checkisservedby);
-	}
-	if (dochecksrv) {
-		dns_zone_setchecksrv(zone, checksrv);
-	}
+	static const dns_zone_ops_t check_ops = {
+		.checkmx = checkmx,
+		.checksrv = checksrv,
+		.checkns = checkns,
+		.checkisservedby = checkisservedby,
+	};
+	dns_zone_setops(zone, &check_ops);
+	dns_zone_setcheckmx(zone, docheckmx);
+	dns_zone_setcheckns(zone, docheckns);
+	dns_zone_setchecksrv(zone, dochecksrv);
 
 	CHECK(dns_zone_load(zone, false));
+
+	if (docheckrpz) {
+		dns_db_t *db = NULL;
+		dns_zone_getdb(zone, &db);
+		result = dns_rpz_checkdb(db, mctx);
+		dns_db_detach(&db);
+		CHECK(result);
+	}
 
 	if (zonep != NULL) {
 		*zonep = zone;

@@ -48,8 +48,6 @@ dns_notifyctx_init(dns_notifyctx_t *nctx, dns_rdatatype_t type) {
 		.notifydelay = 5,
 		.notifies = ISC_LIST_INITIALIZER,
 	};
-	isc_sockaddr_any(&ctx.notifysrc4);
-	isc_sockaddr_any6(&ctx.notifysrc6);
 
 	*nctx = ctx;
 }
@@ -198,7 +196,7 @@ notify_createmessage(dns_notify_t *notify, dns_message_t **messagep) {
 	dns_rdataset_t rdataset;
 	dns_rdata_t rdata = DNS_RDATA_INIT;
 
-	dns_name_t *tempname = NULL;
+	dns_linkedname_t *tempname = NULL;
 	dns_rdata_t *temprdata = NULL;
 	dns_rdatalist_t *temprdatalist = NULL;
 	dns_rdataset_t *temprdataset = NULL;
@@ -224,9 +222,9 @@ notify_createmessage(dns_notify_t *notify, dns_message_t **messagep) {
 	/*
 	 * Make question.
 	 */
-	dns_name_clone(dns_zone_getorigin(notify->zone), tempname);
+	dns_name_clone(dns_zone_getorigin(notify->zone), dns_name(tempname));
 	dns_rdataset_makequestion(temprdataset, dns_zone_getclass(notify->zone),
-				  dns_rdatatype_soa);
+				  notify->type);
 	ISC_LIST_APPEND(tempname->list, temprdataset, link);
 	dns_message_addname(message, tempname, DNS_SECTION_QUESTION);
 	tempname = NULL;
@@ -245,7 +243,7 @@ notify_createmessage(dns_notify_t *notify, dns_message_t **messagep) {
 	INSIST(result == ISC_R_SUCCESS);
 	INSIST(zonedb != NULL); /* XXXJT: is this assumption correct? */
 
-	dns_name_clone(dns_zone_getorigin(notify->zone), tempname);
+	dns_name_clone(dns_zone_getorigin(notify->zone), dns_name(tempname));
 	dns_db_currentversion(zonedb, &version);
 	result = dns_db_findnode(zonedb, tempname, false, &node);
 	if (result != ISC_R_SUCCESS) {
@@ -373,6 +371,8 @@ notify_send_toaddr(void *arg) {
 		goto cleanup;
 	}
 
+	isc_netaddr_fromsockaddr(&dstip, &notify->dst);
+
 	CHECK(notify_createmessage(notify, &message));
 
 	if (notify->key != NULL) {
@@ -380,7 +380,6 @@ notify_send_toaddr(void *arg) {
 		key = notify->key;
 		notify->key = NULL;
 	} else {
-		isc_netaddr_fromsockaddr(&dstip, &notify->dst);
 		result = dns_view_getpeertsig(view, &dstip, &key);
 		if (result != ISC_R_SUCCESS && result != ISC_R_NOTFOUND) {
 			notify_log(notify, ISC_LOG_ERROR,
@@ -426,7 +425,8 @@ notify_send_toaddr(void *arg) {
 
 			src = notify->src;
 			if (isc_sockaddr_equal(&src, &any)) {
-				src = notifyctx->notifysrc4;
+				src = zone_addr4_tosockaddr(
+					&notifyctx->notifysrc4);
 			}
 		}
 		break;
@@ -437,7 +437,8 @@ notify_send_toaddr(void *arg) {
 
 			src = notify->src;
 			if (isc_sockaddr_equal(&src, &any)) {
-				src = notifyctx->notifysrc6;
+				src = zone_addr6_tosockaddr(
+					&notifyctx->notifysrc6);
 			}
 		}
 		break;
@@ -623,11 +624,11 @@ notify_isself(dns_notify_t *notify, isc_sockaddr_t *dst) {
 
 	switch (isc_sockaddr_pf(dst)) {
 	case PF_INET:
-		src = notifyctx->notifysrc4;
+		src = zone_addr4_tosockaddr(&notifyctx->notifysrc4);
 		isc_sockaddr_any(&any);
 		break;
 	case PF_INET6:
-		src = notifyctx->notifysrc6;
+		src = zone_addr6_tosockaddr(&notifyctx->notifysrc6);
 		isc_sockaddr_any6(&any);
 		break;
 	default:
@@ -761,9 +762,10 @@ dns_notify_find_address(dns_notify_t *notify) {
 		goto destroy;
 	}
 
-	result = dns_adb_createfind(adb, loop, process_notify_adb_event, notify,
-				    &notify->ns, options, 0, notify->port, 0,
-				    NULL, NULL, NULL, &notify->find);
+	result = dns_adb_createfind(
+		adb, loop, process_notify_adb_event, notify, &notify->ns,
+		options, 0, notify->port, 0, NULL, NULL, NULL,
+		view->max_delegation_servers, &notify->find, NULL);
 	dns_adb_detach(&adb);
 
 	/* Something failed? */

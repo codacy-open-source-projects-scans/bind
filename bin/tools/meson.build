@@ -17,17 +17,18 @@ named_journalprint_src += files('named-journalprint.c')
 named_nzd2nzf_src += files('named-nzd2nzf.c')
 named_rrchecker_src += files('named-rrchecker.c')
 nsec3hash_src += files('nsec3hash.c')
+wireformat_src += files('named-wireformat.c')
 
 manrst_srcset.add(when: 'HAVE_DNSTAP', if_true: files('dnstap-read.rst'))
 manrst_srcset.add(
     files(
         'arpaname.rst',
-        'dnstap-read.rst',
         'mdig.rst',
         'named-journalprint.rst',
         'named-makejournal.rst',
         'named-nzd2nzf.rst',
         'named-rrchecker.rst',
+        'named-wireformat.rst',
         'nsec3hash.rst',
     ),
 )

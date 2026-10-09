@@ -319,15 +319,15 @@ findnode(dns_db_t *db, const dns_name_t *name, bool create,
 static isc_result_t
 find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
      dns_rdatatype_t type, unsigned int options, isc_stdtime_t now,
-     dns_dbnode_t **nodep, dns_name_t *foundname,
-     dns_clientinfomethods_t *methods, dns_clientinfo_t *clientinfo,
-     dns_rdataset_t *rdataset, dns_rdataset_t *sigrdataset DNS__DB_FLARG) {
+     dns_name_t *foundname, dns_clientinfomethods_t *methods,
+     dns_clientinfo_t *clientinfo, dns_rdataset_t *rdataset,
+     dns_rdataset_t *sigrdataset DNS__DB_FLARG) {
 	sampledb_t *sampledb = (sampledb_t *)db;
 
 	REQUIRE(VALID_SAMPLEDB(sampledb));
 
 	return dns__db_find(sampledb->db, name, version, type, options, now,
-			    nodep, foundname, methods, clientinfo, rdataset,
+			    foundname, methods, clientinfo, rdataset,
 			    sigrdataset DNS__DB_FLARG_PASS);
 }
 
@@ -338,6 +338,18 @@ setcachestats(dns_db_t *db, isc_stats_t *stats) {
 	REQUIRE(VALID_SAMPLEDB(sampledb));
 
 	return dns_db_setcachestats(sampledb->db, stats);
+}
+
+static void
+addglue(dns_db_t *db, dns_dbversion_t *version, const dns_name_t *owner_name,
+	dns_rdataset_t *rdataset, dns_message_t *msg,
+	dns_clientinfomethods_t *methods, dns_clientinfo_t *clientinfo) {
+	sampledb_t *sampledb = (sampledb_t *)db;
+
+	REQUIRE(VALID_SAMPLEDB(sampledb));
+
+	dns_db_addglue(sampledb->db, version, owner_name, rdataset, msg,
+		       methods, clientinfo);
 }
 
 /*
@@ -367,6 +379,7 @@ static dns_dbmethods_t sampledb_methods = {
 	.findnode = findnode,
 	.find = find,
 	.setcachestats = setcachestats,
+	.addglue = addglue,
 };
 
 /* Auxiliary driver functions. */
@@ -427,7 +440,6 @@ add_ns(dns_db_t *db, dns_dbversion_t *version, const dns_name_t *name,
 	dns_rdatalist_init(&rdatalist);
 	ns.common.rdtype = dns_rdatatype_ns;
 	ns.common.rdclass = dns_db_class(db);
-	ns.mctx = NULL;
 	dns_name_init(&ns.name);
 	dns_name_clone(nsname, &ns.name);
 	CHECK(dns_rdata_fromstruct(&rdata, dns_db_class(db), dns_rdatatype_ns,

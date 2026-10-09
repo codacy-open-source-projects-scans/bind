@@ -1,0 +1,8 @@
+options {
+	{% include_indented "_common/options.conf.j2" %}
+	allow-query { any; };
+	forwarders { 10.53.0.3 port @PORT@; };
+	forward only;
+};
+
+{% include "_common/controls.conf.j2" %}

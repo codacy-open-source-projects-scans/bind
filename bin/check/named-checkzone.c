@@ -24,6 +24,7 @@
 #include <isc/lib.h>
 #include <isc/log.h>
 #include <isc/mem.h>
+#include <isc/parseint.h>
 #include <isc/result.h>
 #include <isc/string.h>
 #include <isc/timer.h>
@@ -66,14 +67,14 @@ usage(int ret);
 static void
 usage(int ret) {
 	fprintf(stderr,
-		"usage: %s [-djqvD] [-c class] "
+		"usage: %s [-djqvDP] [-c class] "
 		"[-f inputformat] [-F outputformat] [-J filename] "
 		"[-s (full|relative)] [-t directory] [-w directory] "
 		"[-k (ignore|warn|fail)] [-m (ignore|warn|fail)] "
 		"[-n (ignore|warn|fail)] [-r (ignore|warn|fail)] "
 		"[-i (full|full-sibling|local|local-sibling|none)] "
-		"[-M (ignore|warn|fail)] [-S (ignore|warn|fail)] "
-		"[-W (ignore|warn)] "
+		"[-M (ignore|warn|fail)] [-R (ignore|fail)] "
+		"[-S (ignore|warn|fail)] [-W (ignore|warn)] "
 		"%s zonename [ (filename|-) ]\n",
 		isc_commandline_progname,
 		progmode == progmode_check ? "[-o filename]" : "-o filename");
@@ -107,16 +108,17 @@ main(int argc, char **argv) {
 	bool snset = false;
 	bool logdump = false;
 	FILE *errout = stdout;
-	char *endp;
 
 	outputstyle = &dns_master_style_full;
 
 	isc_commandline_init(argc, argv);
 
-	if (strcasecmp(isc_commandline_progname, "named-checkzone") == 0) {
+	if (isc_string_casehasprefix(isc_commandline_progname,
+				     "named-checkzone"))
+	{
 		progmode = progmode_check;
-	} else if (strcasecmp(isc_commandline_progname, "named-compilezone") ==
-		   0)
+	} else if (isc_string_casehasprefix(isc_commandline_progname,
+					    "named-compilezone"))
 	{
 		progmode = progmode_compile;
 	} else {
@@ -137,7 +139,7 @@ main(int argc, char **argv) {
 
 	while ((c = isc_commandline_parse(argc, argv,
 					  "c:df:hi:jJ:k:L:l:m:n:qr:s:t:o:vw:C:"
-					  "DF:M:R:S:T:W:")) != EOF)
+					  "DF:M:PR:S:T:W:")) != EOF)
 	{
 		switch (c) {
 		case 'c':
@@ -222,22 +224,23 @@ main(int argc, char **argv) {
 
 		case 'L':
 			snset = true;
-			endp = NULL;
-			serialnum = strtol(isc_commandline_argument, &endp, 0);
-			if (*endp != '\0') {
-				fprintf(stderr, "source serial number "
-						"must be numeric");
+			if (isc_parse_uint32(&serialnum,
+					     isc_commandline_argument,
+					     0) != ISC_R_SUCCESS)
+			{
+				fprintf(stderr, "source serial number must be "
+						"a 32-bit unsigned integer\n");
 				exit(EXIT_FAILURE);
 			}
 			break;
 
 		case 'l':
 			zone_options |= DNS_ZONEOPT_CHECKTTL;
-			endp = NULL;
-			maxttl = strtol(isc_commandline_argument, &endp, 0);
-			if (*endp != '\0') {
-				fprintf(stderr, "maximum TTL "
-						"must be numeric");
+			if (isc_parse_uint32(&maxttl, isc_commandline_argument,
+					     0) != ISC_R_SUCCESS)
+			{
+				fprintf(stderr, "maximum TTL must be a 32-bit "
+						"unsigned integer\n");
 				exit(EXIT_FAILURE);
 			}
 			break;
@@ -278,6 +281,10 @@ main(int argc, char **argv) {
 
 		case 'o':
 			output_filename = isc_commandline_argument;
+			break;
+
+		case 'P':
+			docheckrpz = true;
 			break;
 
 		case 'q':
@@ -447,7 +454,7 @@ main(int argc, char **argv) {
 			inputformat = dns_masterformat_text;
 		} else if (strcasecmp(inputformatstr, "raw") == 0) {
 			inputformat = dns_masterformat_raw;
-		} else if (strncasecmp(inputformatstr, "raw=", 4) == 0) {
+		} else if (isc_string_casehasprefix(inputformatstr, "raw=")) {
 			inputformat = dns_masterformat_raw;
 			fprintf(stderr, "WARNING: input format raw, version "
 					"ignored\n");
@@ -459,18 +466,19 @@ main(int argc, char **argv) {
 	}
 
 	if (outputformatstr != NULL) {
+		const char *rawver = NULL;
 		if (strcasecmp(outputformatstr, "text") == 0) {
 			outputformat = dns_masterformat_text;
 		} else if (strcasecmp(outputformatstr, "raw") == 0) {
 			outputformat = dns_masterformat_raw;
-		} else if (strncasecmp(outputformatstr, "raw=", 4) == 0) {
+		} else if ((rawver = isc_string_casestripprefix(
+				    outputformatstr, "raw=")) != NULL)
+		{
 			char *end;
 
 			outputformat = dns_masterformat_raw;
-			rawversion = strtol(outputformatstr + 4, &end, 10);
-			if (end == outputformatstr + 4 || *end != '\0' ||
-			    rawversion > 1U)
-			{
+			rawversion = strtol(rawver, &end, 10);
+			if (end == rawver || *end != '\0' || rawversion > 1U) {
 				fprintf(stderr, "unknown raw format version\n");
 				exit(EXIT_FAILURE);
 			}

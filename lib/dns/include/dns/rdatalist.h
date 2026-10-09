@@ -111,7 +111,7 @@ dns_rdatalist_fromrdataset(dns_rdataset_t   *rdataset,
  * The following are implementation functions for list-based rdatasets.
  * They are called by rdataset implementations in rdatalist.c, sdlz.c,
  * and builtin.c. They are not meant to be used directly by callers of
- * those implmentations.
+ * those implementations.
  */
 void
 dns_rdatalist_disassociate(dns_rdataset_t *rdatasetp DNS__DB_FLARG);
@@ -127,15 +127,10 @@ dns__rdatalist_clone(const dns_rdataset_t  *source,
 unsigned int
 dns__rdatalist_count(dns_rdataset_t *rdataset);
 isc_result_t
-dns__rdatalist_addnoqname(dns_rdataset_t *rdataset, dns_name_t *name);
+dns__rdatalist_addnoqname(dns_rdataset_t *rdataset, dns_linkedname_t *name,
+			  dns_rdatatype_t type);
 isc_result_t
 dns__rdatalist_getnoqname(dns_rdataset_t *rdataset, dns_name_t *name,
-			  dns_rdataset_t	*neg,
-			  dns_rdataset_t *negsig DNS__DB_FLARG);
-isc_result_t
-dns__rdatalist_addclosest(dns_rdataset_t *rdataset, dns_name_t *name);
-isc_result_t
-dns__rdatalist_getclosest(dns_rdataset_t *rdataset, dns_name_t *name,
 			  dns_rdataset_t	*neg,
 			  dns_rdataset_t *negsig DNS__DB_FLARG);
 void

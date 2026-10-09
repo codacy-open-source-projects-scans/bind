@@ -15,14 +15,22 @@
 
 /*! \file */
 
+#include <stdalign.h>
 #include <stdbool.h>
+
+#include <isc/os.h>
+#include <isc/sockaddr.h>
+#include <isc/util.h>
 
 #include <dns/adb.h>
 #include <dns/db.h>
 #include <dns/notify.h>
 #include <dns/remote.h>
 #include <dns/update.h>
+#include <dns/zoneaddr.h>
 #include <dns/zonefetch.h>
+
+#include "zone/viewname_p.h"
 
 /*%
  *	Types and functions below meant to be used for internal zone
@@ -155,7 +163,6 @@ typedef enum {
 	DNS_ZONEFLG_THAW = 1U << 24,
 	DNS_ZONEFLG_LOADPENDING = 1U << 25, /*%< Loading scheduled */
 	DNS_ZONEFLG_NODELAY = 1U << 26,
-	DNS_ZONEFLG_SENDSECURE = 1U << 27,
 	DNS_ZONEFLG_NEEDSTARTUPNOTIFY = 1U << 28, /*%< need to send out
 						   * notify due to the zone
 						   * just being loaded for
@@ -187,6 +194,31 @@ typedef ISC_LIST(dns_signing_t) dns_signinglist_t;
 typedef struct dns_nsec3chain dns_nsec3chain_t;
 typedef ISC_LIST(dns_nsec3chain_t) dns_nsec3chainlist_t;
 typedef struct dns_include dns_include_t;
+
+/*
+ * Pending inline-signing sync request for the secure zone.  Active incremental
+ * signing continuation state is owned separately by zone_inline_sync_t.
+ */
+typedef enum inline_sync_phase {
+	inline_sync_idle = 0,	     /*%< No inline sync request is queued. */
+	inline_sync_incremental = 1, /*%< Incremental sync is queued. */
+	inline_sync_full = 2,	     /*%< Full rebuild is queued. */
+} inline_sync_phase_t;
+
+/*
+ * In-flight inline-signing sync transaction.  Pointed to by zone->iss; NULL
+ * means no sync is running.
+ */
+typedef struct zone_inline_sync {
+	isc_mem_t *mctx;
+	dns_zone_t *raw;
+	dns_db_t *db;
+	dns_dbversion_t *oldver;
+	dns_dbversion_t *newver;
+	dns_diff_t diff;
+	dns_update_state_t *state;
+	uint32_t end;
+} zone_inline_sync_t;
 
 /*%
  * Hold checkds state.
@@ -331,21 +363,94 @@ struct dns_zonemgr {
 	isc_rwlock_t tlsctx_cache_rwlock;
 };
 
+static inline zone_addr4_t
+zone_addr4_fromsockaddr(const isc_sockaddr_t *sockaddr) {
+	REQUIRE(sockaddr != NULL);
+	REQUIRE(sockaddr->type.sa.sa_family == AF_INET);
+	REQUIRE(sockaddr->type.sin.sin_port == 0);
+	return (zone_addr4_t){
+		.address = sockaddr->type.sin.sin_addr,
+	};
+}
+
+static inline zone_addr6_t
+zone_addr6_fromsockaddr(const isc_sockaddr_t *sockaddr) {
+	REQUIRE(sockaddr != NULL);
+	REQUIRE(sockaddr->type.sa.sa_family == AF_INET6);
+	REQUIRE(sockaddr->type.sin6.sin6_port == 0);
+	REQUIRE(sockaddr->type.sin6.sin6_flowinfo == 0);
+	return (zone_addr6_t){
+		.address = sockaddr->type.sin6.sin6_addr,
+		.scope = sockaddr->type.sin6.sin6_scope_id,
+	};
+}
+
+static inline isc_sockaddr_t
+zone_addr4_tosockaddr(const zone_addr4_t *address) {
+	isc_sockaddr_t sockaddr;
+	isc_sockaddr_fromin(&sockaddr, &address->address, 0);
+	return sockaddr;
+}
+
+static inline isc_sockaddr_t
+zone_addr6_tosockaddr(const zone_addr6_t *address) {
+	isc_sockaddr_t sockaddr;
+	isc_sockaddr_fromin6(&sockaddr, &address->address, 0);
+	sockaddr.type.sin6.sin6_scope_id = address->scope;
+	return sockaddr;
+}
+
+static inline zone_addr_t
+zone_addr_fromsockaddr(const isc_sockaddr_t *sockaddr) {
+	zone_addr_t address = { .family = sockaddr->type.sa.sa_family };
+	switch (address.family) {
+	case AF_INET:
+		address.type.in = zone_addr4_fromsockaddr(sockaddr);
+		break;
+	case AF_INET6:
+		address.type.in6 = zone_addr6_fromsockaddr(sockaddr);
+		break;
+	default:
+		UNREACHABLE();
+	}
+	return address;
+}
+
+static inline isc_sockaddr_t
+zone_addr_tosockaddr(const zone_addr_t *address) {
+	switch (address->family) {
+	case AF_INET:
+		return zone_addr4_tosockaddr(&address->type.in);
+	case AF_INET6:
+		return zone_addr6_tosockaddr(&address->type.in6);
+	case AF_UNSPEC:
+		/* No source has been selected for an operation yet. */
+		return (isc_sockaddr_t){ 0 };
+	default:
+		UNREACHABLE();
+	}
+}
+
 /*%
  * Zone structure.
  */
 struct dns_zone {
 	/* Unlocked */
-	unsigned int magic;
+	alignas(ISC_OS_CACHELINE_SIZE) unsigned int magic;
 	isc_mutex_t lock;
 #ifdef DNS_ZONE_CHECKLOCK
 	bool locked;
 #endif /* ifdef DNS_ZONE_CHECKLOCK */
 	isc_mem_t *mctx;
-	isc_refcount_t references;
+	alignas(ISC_OS_CACHELINE_SIZE) isc_refcount_t references;
+	char *masterfile;
+	char *initfile;
+	const FILE *stream;		  /* loading from a stream? */
+	ISC_LIST(dns_include_t) includes; /* Include files */
 
-	isc_rwlock_t dblock;
+	/* Keep db before the aligned lock so they cannot share a cache line. */
 	dns_db_t *db; /* Locked by dblock */
+	alignas(ISC_OS_CACHELINE_SIZE) isc_rwlock_t dblock;
 
 	isc_tid_t tid;
 	/* Locked */
@@ -356,12 +461,7 @@ struct dns_zone {
 	isc_refcount_t irefs;
 	dns_name_t origin;
 	dns_rad_t *rad;
-	char *masterfile;
-	char *initfile;
-	const FILE *stream;		     /* loading from a stream? */
-	ISC_LIST(dns_include_t) includes;    /* Include files */
 	ISC_LIST(dns_include_t) newincludes; /* Loading */
-	unsigned int nincludes;
 	dns_masterformat_t masterformat;
 	const dns_master_style_t *masterstyle;
 	char *journal;
@@ -417,11 +517,11 @@ struct dns_zone {
 	dns_remote_t cds_endpoints;
 	dns_notifyctx_t notifycds;
 
-	isc_sockaddr_t parentalsrc4;
-	isc_sockaddr_t parentalsrc6;
-	isc_sockaddr_t xfrsource4;
-	isc_sockaddr_t xfrsource6;
-	isc_sockaddr_t sourceaddr;
+	zone_addr4_t parentalsrc4;
+	zone_addr6_t parentalsrc6;
+	zone_addr4_t xfrsource4;
+	zone_addr6_t xfrsource6;
+	zone_addr_t sourceaddr;
 	dns_tsigkey_t *tsigkey;	    /* key used for xfr */
 	dns_transport_t *transport; /* transport used for xfr */
 	/* Access Control Lists */
@@ -448,15 +548,12 @@ struct dns_zone {
 	uint32_t sigvalidityinterval;
 	uint32_t keyvalidityinterval;
 	uint32_t sigresigninginterval;
+	dns_viewname_t viewname;
 	dns_view_t *view;
 	dns_view_t *prev_view;
 	dns_kasp_t *kasp;
 	dns_kasp_t *defaultkasp;
 	dns_dnsseckeylist_t keyring;
-	dns_checkmxfunc_t checkmx;
-	dns_checksrvfunc_t checksrv;
-	dns_checknsfunc_t checkns;
-	dns_checkisservedbyfunc_t checkisservedby;
 	/*%
 	 * Zones in certain states such as "waiting for zone transfer"
 	 * or "zone transfer in progress" are kept on per-state linked lists
@@ -480,13 +577,12 @@ struct dns_zone {
 	isc_stats_t *requeststats;
 	isc_statsmulti_t *rcvquerystats;
 	dns_stats_t *dnssecsignstats;
-	dns_isselffunc_t isself;
+	const dns_zone_ops_t *ops;
+	bool checkmx  : 1;
+	bool checksrv : 1;
+	bool checkns  : 1; /* Also enables checkisservedby. */
+	bool isself   : 1;
 	void *isselfarg;
-
-	char *strnamerd;
-	char *strname;
-	char *strrdclass;
-	char *strviewname;
 
 	/*%
 	 * Serial number for deferred journal compaction.
@@ -498,9 +594,9 @@ struct dns_zone {
 	dns_signinglist_t signing;
 	dns_nsec3chainlist_t nsec3chain;
 	/*%
-	 * List of outstanding NSEC3PARAM change requests.
+	 * Ordered DB-mutating requests processed by zone maintenance.
 	 */
-	ISC_LIST(struct np3) setnsec3param_queue;
+	ISC_LIST(struct zone_maintenance_request) maintenance_queue;
 	/*%
 	 * Signing / re-signing quantum stopping parameters.
 	 */
@@ -576,13 +672,8 @@ struct dns_zone {
 	/*
 	 * Inline zone signing state.
 	 */
-	dns_diff_t rss_diff;
-	dns_dbversion_t *rss_newver;
-	dns_dbversion_t *rss_oldver;
-	dns_db_t *rss_db;
-	dns_zone_t *rss_raw;
-	struct rss *rss;
-	dns_update_state_t *rss_state;
+	inline_sync_phase_t inline_sync_phase;
+	zone_inline_sync_t *iss;
 
 	isc_stats_t *gluecachestats;
 
@@ -596,12 +687,11 @@ struct dns_zone {
 	 * Plugin-related data structures
 	 */
 	void *plugins;
-	void (*plugins_free)(isc_mem_t *, void **);
 	void *hooktable;
-	void (*hooktable_free)(isc_mem_t *, void **);
 
-	/* Configuration text */
-	char *cfg;
+	/* Configuration object */
+	void *cfg;
+	void (*cfg_detach)(void *);
 };
 
 typedef struct {
@@ -840,7 +930,7 @@ dns__zone_freedbargs(dns_zone_t *zone);
  */
 
 void
-dns__zone_settimer(dns_zone_t *zone, isc_time_t *now);
+dns__zone_settimer(dns_zone_t *zone, isc_time_t now);
 /*%<
  *	Sets zone timer to 'now' time.
  *

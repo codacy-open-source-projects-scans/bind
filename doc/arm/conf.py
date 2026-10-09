@@ -1,4 +1,3 @@
-############################################################################
 # Copyright (C) Internet Systems Consortium, Inc. ("ISC")
 #
 # SPDX-License-Identifier: MPL-2.0
@@ -9,7 +8,6 @@
 #
 # See the COPYRIGHT file distributed with this work for additional
 # information regarding copyright ownership.
-############################################################################
 
 import sys
 import re
@@ -218,6 +216,7 @@ linkcheck_timeout = 10
 linkcheck_ignore = [
     "http://127.0.0.1",
     "https://dl.acm.org",
+    "https://gitlab.gnome.org",
     "https://gitlab.isc.org",
     "https://kb.isc.org",
     "https://simpleicon.com/",

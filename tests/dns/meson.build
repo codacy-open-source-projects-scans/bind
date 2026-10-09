@@ -13,19 +13,24 @@ dns_tests = [
     'acl',
     'badcache',
     'byaddr',
+    'compress',
     'db',
     'dbdiff',
     'dbiterator',
     'dbversion',
     'deleg',
+    'diff',
     'dispatch',
     'dns64',
+    'dnssecsignstats',
     'dst',
     'ede',
     'keytable',
     'master',
+    'message',
     'name',
     'nametree',
+    'ncache',
     'nsec3',
     'nsec3param',
     'private',
@@ -40,16 +45,31 @@ dns_tests = [
     'resolver',
     'rsa',
     'sigs',
+    'skr',
     'time',
     'transport',
     'tsig',
     'unreachcache',
     'update',
     'vecheader',
+    'viewname',
     'zonefile',
     'zonemgr',
+    'zoneverify',
     'zt',
 ]
+
+flaky_dns_tests = [
+    'qpdb',
+]
+
+_all_dns_tests = dns_tests + ['geoip', 'dnstap']
+run_command(
+    check_test_registration,
+    meson.current_source_dir(),
+    _all_dns_tests,
+    check: true,
+)
 
 if config.has('HAVE_GEOIP2')
     dns_tests += 'geoip'
@@ -108,13 +128,26 @@ foreach unit : dns_tests
         ],
     )
 
+    suites = ['dns', 'cmocka']
+    timeout = 300
+    unit_env = test_env
+    if unit in flaky_dns_tests
+        suites += 'flaky'
+        # Pass FLAKY and TIMEOUT to the test wrapper so it can retry
+        # appropriately.  Build a fresh environment instead of mutating the
+        # shared test_env, which meson stores by reference and would otherwise
+        # leak these variables into every other test.
+        unit_env = environment(
+            test_env_vars + {'FLAKY': '1', 'TIMEOUT': timeout.to_string()},
+        )
+    endif
     test(
         unit,
         test_bin,
         depends: master_data,
-        env: test_env,
-        suite: ['dns', 'cmocka'],
-        timeout: 300,
+        env: unit_env,
+        suite: suites,
+        timeout: timeout,
         workdir: meson.current_source_dir(),
     )
 endforeach

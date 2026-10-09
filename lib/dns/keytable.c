@@ -268,7 +268,7 @@ delete_ds(dns_qp_t *qp, dns_keytable_t *keytable, dns_keynode_t *knode,
 	ISC_LIST_FOREACH(knode->dslist->rdata, rdata, link) {
 		if (dns_rdata_compare(rdata, &dsrdata) != 0) {
 			dns_rdata_ds_t ds0;
-			result = dns_rdata_tostruct(rdata, &ds0, NULL);
+			result = dns_rdata_tostruct(rdata, &ds0);
 			RUNTIME_CHECK(result == ISC_R_SUCCESS);
 			add_ds(newnode, &ds0, keytable->mctx);
 		}
@@ -424,7 +424,7 @@ dns_keytable_deletekey(dns_keytable_t *keytable, const dns_name_t *keyname,
 	isc_result_t result;
 	dns_keynode_t *knode = NULL;
 	dns_rdata_t rdata = DNS_RDATA_INIT;
-	unsigned char data[4096], digest[DNS_DS_BUFFERSIZE];
+	unsigned char data[DNS_RDATA_MAXLENGTH], digest[DNS_DS_BUFFERSIZE];
 	dns_rdata_ds_t ds;
 	isc_buffer_t b;
 	dns_qp_t *qp = NULL;
@@ -613,7 +613,7 @@ keynode_dslist_totext(dns_keynode_t *keynode, isc_buffer_t *text) {
 		dns_rdata_ds_t ds;
 
 		dns_rdataset_current(&dsset, &rdata);
-		result = dns_rdata_tostruct(&rdata, &ds, NULL);
+		result = dns_rdata_tostruct(&rdata, &ds);
 		RUNTIME_CHECK(result == ISC_R_SUCCESS);
 
 		dns_secalg_format(ds.algorithm, algbuf, sizeof(algbuf));

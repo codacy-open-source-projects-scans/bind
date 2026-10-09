@@ -23,6 +23,7 @@ fromtext_eui48(ARGS_FROMTEXT) {
 	isc_token_t token;
 	unsigned char eui48[6];
 	unsigned int l0, l1, l2, l3, l4, l5;
+	char buf[sizeof("xx-xx-xx-xx-xx-xx")];
 	int n;
 
 	REQUIRE(type == dns_rdatatype_eui48);
@@ -40,6 +41,16 @@ fromtext_eui48(ARGS_FROMTEXT) {
 	if (n != 6 || l0 > 255U || l1 > 255U || l2 > 255U || l3 > 255U ||
 	    l4 > 255U || l5 > 255U)
 	{
+		return DNS_R_BADEUI;
+	}
+
+	/*
+	 * Check that leading zeros were present and that there wasn't
+	 * trailing garbage.
+	 */
+	n = snprintf(buf, sizeof(buf), "%02x-%02x-%02x-%02x-%02x-%02x", l0, l1,
+		     l2, l3, l4, l5);
+	if (n != sizeof(buf) - 1 || strcasecmp(DNS_AS_STR(token), buf) != 0) {
 		return DNS_R_BADEUI;
 	}
 
@@ -134,22 +145,10 @@ tostruct_eui48(ARGS_TOSTRUCT) {
 	REQUIRE(eui48 != NULL);
 	REQUIRE(rdata->length == 6);
 
-	UNUSED(mctx);
-
 	DNS_RDATACOMMON_INIT(eui48, rdata->type, rdata->rdclass);
 
 	memmove(eui48->eui48, rdata->data, rdata->length);
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_eui48(ARGS_FREESTRUCT) {
-	dns_rdata_eui48_t *eui48 = source;
-
-	REQUIRE(eui48 != NULL);
-	REQUIRE(eui48->common.rdtype == dns_rdatatype_eui48);
-
-	return;
 }
 
 static isc_result_t

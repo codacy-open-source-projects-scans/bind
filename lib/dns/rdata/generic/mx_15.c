@@ -239,24 +239,8 @@ tostruct_mx(ARGS_TOSTRUCT) {
 	isc_region_consume(&region, 2);
 	dns_name_fromregion(&name, &region);
 	dns_name_init(&mx->mx);
-	name_duporclone(&name, mctx, &mx->mx);
-	mx->mctx = mctx;
+	dns_name_clone(&name, &mx->mx);
 	return ISC_R_SUCCESS;
-}
-
-static void
-freestruct_mx(ARGS_FREESTRUCT) {
-	dns_rdata_mx_t *mx = source;
-
-	REQUIRE(mx != NULL);
-	REQUIRE(mx->common.rdtype == dns_rdatatype_mx);
-
-	if (mx->mctx == NULL) {
-		return;
-	}
-
-	dns_name_free(&mx->mx, mx->mctx);
-	mx->mctx = NULL;
 }
 
 static unsigned char port25_ndata[] = "\003_25\004_tcp";
@@ -278,20 +262,19 @@ additionaldata_mx(ARGS_ADDLDATA) {
 	isc_region_consume(&region, 2);
 	dns_name_fromregion(&name, &region);
 
-	if (dns_name_equal(&name, dns_rootname)) {
+	if (dns_name_isroot(&name)) {
 		return ISC_R_SUCCESS;
 	}
 
 	RETERR((add)(arg, &name, dns_rdatatype_a, NULL DNS__DB_FILELINE));
 
 	dns_fixedname_init(&fixed);
-	result = dns_name_concatenate(&port25, &name,
-				      dns_fixedname_name(&fixed));
+	result = dns_name_concatenate(&port25, &name, dns_name(&fixed));
 	if (result != ISC_R_SUCCESS) {
 		return ISC_R_SUCCESS;
 	}
 
-	return (add)(arg, dns_fixedname_name(&fixed), dns_rdatatype_tlsa,
+	return (add)(arg, dns_name(&fixed), dns_rdatatype_tlsa,
 		     NULL DNS__DB_FILELINE);
 }
 

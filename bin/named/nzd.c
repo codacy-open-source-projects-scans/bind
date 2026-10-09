@@ -12,7 +12,10 @@
  */
 
 #include <lmdb.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
+#include <isc/dir.h> /* Required on GNU/Hurd */
 #include <isc/file.h>
 
 #include <dns/fixedname.h>
@@ -30,8 +33,8 @@ nzd_setkey(MDB_val *key, dns_name_t *name, char *namebuf, size_t buflen) {
 	dns_fixedname_t fixed;
 
 	dns_fixedname_init(&fixed);
-	dns_name_downcase(name, dns_fixedname_name(&fixed));
-	dns_name_format(dns_fixedname_name(&fixed), namebuf, buflen);
+	dns_name_downcase(name, dns_name(&fixed));
+	dns_name_format(&fixed, namebuf, buflen);
 
 	key->mv_data = namebuf;
 	key->mv_size = strlen(namebuf);
@@ -235,6 +238,7 @@ nzd_env_close(dns_view_t *view) {
 	const char *dbpath = NULL;
 	char dbpath_copy[PATH_MAX];
 	char lockpath[PATH_MAX];
+	struct stat sb;
 	int status, ret;
 
 	if (view->newzone.dbenv == NULL) {
@@ -249,9 +253,13 @@ nzd_env_close(dns_view_t *view) {
 
 	/*
 	 * Database files must be owned by the eventual user, not by root.
+	 * Use lstat()/S_ISREG/lchown() so a symlink at the path cannot
+	 * redirect the chown to an unrelated file.
 	 */
-	ret = chown(dbpath_copy, named_os_uid(), -1);
-	UNUSED(ret);
+	if (lstat(dbpath_copy, &sb) == 0 && S_ISREG(sb.st_mode)) {
+		ret = lchown(dbpath_copy, named_os_uid(), -1);
+		UNUSED(ret);
+	}
 
 	/*
 	 * Some platforms need the lockfile not to exist when we reopen the

@@ -122,18 +122,24 @@ n=$((n + 1))
 
 ret=0
 echo_i "verifying active sockets output in named.stats ($n)"
-nsock1nstat=$(grep "UDP/IPv4 sockets active" $last_stats | awk '{print $1}')
-[ $((nsock1nstat - nsock0nstat)) -eq 1 ] || ret=1
+# After repeated UDP timeouts to the same authoritative server, the
+# resolver switches to TCP, so the in-flight socket may be either UDP
+# or TCP.  Require at least one extra active socket of either kind.
+nsock1udp=$(grep "UDP/IPv4 sockets active" $last_stats | awk '{print $1}')
+nsock1tcp=$(grep "TCP/IPv4 sockets active" $last_stats | awk '{print $1}')
+[ $((${nsock1udp:-0} + ${nsock1tcp:-0} - nsock0nstat)) -ge 1 ] || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 n=$((n + 1))
 
-# there should be 1 UDP and no TCP queries.  As the TCP counter is zero
-# no status line is emitted.
+# There should be 1 query in progress.  After repeated UDP timeouts the
+# resolver switches to TCP, so depending on which retry attempt the
+# snapshot captures the query may be counted as either UDP or TCP.
 ret=0
 echo_i "verifying queries in progress in named.stats ($n)"
-grep "1 UDP queries in progress" $last_stats >/dev/null || ret=1
-grep "TCP queries in progress" $last_stats >/dev/null && ret=1
+udp_in_progress=$(awk '/UDP queries in progress/ {print $1}' $last_stats)
+tcp_in_progress=$(awk '/TCP queries in progress/ {print $1}' $last_stats)
+[ $((${udp_in_progress:-0} + ${tcp_in_progress:-0})) -eq 1 ] || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 n=$((n + 1))
@@ -177,15 +183,27 @@ status=$((status + ret))
 n=$((n + 1))
 
 ret=0
+echo_i "checking truncated xml path is rejected ($n)"
+if $FEATURETEST --have-libxml2 && "${CURL}" --http1.1 http://10.53.0.3:${EXTRAPORT1} >/dev/null 2>&1; then
+  ${CURL} --http1.1 -o curl.out.${n}.xsl http://10.53.0.3:${EXTRAPORT1}/bind9 2>/dev/null || ret=1
+  grep "No such URL." curl.out.${n}.xsl >/dev/null || ret=1
+else
+  echo_i "skipping test as libxml2 and/or curl with HTTP/1.1 support was not found"
+fi
+if [ $ret != 0 ]; then echo_i "failed"; fi
+status=$((status + ret))
+n=$((n + 1))
+
+ret=0
 echo_i "checking bind9.xsl vs xml ($n)"
 if $FEATURETEST --have-libxml2 && "${CURL}" --http1.1 http://10.53.0.3:${EXTRAPORT1} >/dev/null 2>&1 && [ -x "${XSLTPROC}" ]; then
   $DIGCMD +notcp +recurse @10.53.0.3 soa . >dig.out.test$n.1 2>&1
   $DIGCMD +notcp +recurse @10.53.0.3 soa example >dig.out.test$n.2 2>&1
   # check multiple requests over the same socket
-  time1=$($PERL -e 'print time(), "\n";')
+  time1=$(date +%s)
   ${CURL} --http1.1 -o curl.out.${n}.xml http://10.53.0.3:${EXTRAPORT1}/xml/v3 \
     -o curl.out.${n}.xsl http://10.53.0.3:${EXTRAPORT1}/bind9.xsl 2>/dev/null || ret=1
-  time2=$($PERL -e 'print time(), "\n";')
+  time2=$(date +%s)
   test $((time2 - time1)) -lt 5 || ret=1
   diff ${TOP_SRCDIR}/bin/named/bind9.xsl curl.out.${n}.xsl || ret=1
   ${XSLTPROC} curl.out.${n}.xsl - <curl.out.${n}.xml >xsltproc.out.${n} 2>/dev/null || ret=1
@@ -352,22 +370,26 @@ echo_i "Check that 'zone-statistics full;' is processed by 'rndc reconfig' ($n)"
 ret=0
 # off by default
 rndc_stats ns2 10.53.0.2 || ret=1
-sed -n '/Per Zone Query Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null && ret=0
+sed -n '/Per Zone Query Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null && ret=1
+sed -n '/Per Zone Glue Cache Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null && ret=1
 # turn on
 cp ns2/named2.conf ns2/named.conf
 rndc_reconfig ns2 10.53.0.2
 rndc_stats ns2 10.53.0.2 || ret=1
 sed -n '/Per Zone Query Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null || ret=1
+sed -n '/Per Zone Glue Cache Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null || ret=1
 # turn off
 cp ns2/named1.conf ns2/named.conf
 rndc_reconfig ns2 10.53.0.2
 rndc_stats ns2 10.53.0.2 || ret=1
-sed -n '/Per Zone Query Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null && ret=0
+sed -n '/Per Zone Query Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null && ret=1
+sed -n '/Per Zone Glue Cache Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null && ret=1
 # turn on
 cp ns2/named2.conf ns2/named.conf
 rndc_reconfig ns2 10.53.0.2
 rndc_stats ns2 10.53.0.2 || ret=1
 sed -n '/Per Zone Query Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null || ret=1
+sed -n '/Per Zone Glue Cache Statistics/,/^++/p' $last_stats | grep -F '[example]' >/dev/null || ret=1
 if [ $ret != 0 ]; then echo_i "failed"; fi
 status=$((status + ret))
 n=$((n + 1))

@@ -136,7 +136,12 @@ static dns_zone_t *served_zone = NULL;
 
 void
 ns_test_serve_zone_sethooktab(ns_hooktable_t *hooktab) {
-	dns_zone_sethooktable(served_zone, hooktab, ns_hooktable_free);
+	static const dns_zone_ops_t ops = {
+		.hooktable_free = ns_hooktable_free,
+	};
+
+	dns_zone_setops(served_zone, &ops);
+	dns_zone_sethooktable(served_zone, hooktab);
 }
 
 isc_result_t
@@ -244,7 +249,7 @@ attach_query_msg_to_client(ns_client_t *client, const char *qnamestr,
 	dns_rdataset_t *qrdataset = NULL;
 	dns_message_t *message = NULL;
 	unsigned char query[65535];
-	dns_name_t *qname = NULL;
+	dns_linkedname_t *qname = NULL;
 	isc_buffer_t querybuf;
 	dns_compress_t cctx;
 	isc_result_t result;
@@ -279,7 +284,7 @@ attach_query_msg_to_client(ns_client_t *client, const char *qnamestr,
 	 * class IN and type "qtype", link the two and add the result to the
 	 * QUESTION section of the query.
 	 */
-	result = dns_name_fromstring(qname, qnamestr, dns_rootname, 0,
+	result = dns_name_fromstring(dns_name(qname), qnamestr, dns_rootname, 0,
 				     isc_g_mctx);
 	if (result != ISC_R_SUCCESS) {
 		goto put_name;
@@ -438,11 +443,11 @@ ns_test_qctx_create(const ns_test_qctx_create_params_t *params,
 	}
 
 	/*
-	 * Allow recursion for the client.  As NS_CLIENTATTR_RA normally gets
-	 * set in ns_client_request(), i.e. earlier than the unit tests hook
+	 * Allow recursion for the client.  As inner.ra normally gets set
+	 * in ns_client_request(), i.e. earlier than the unit tests hook
 	 * into the call chain, just set it manually.
 	 */
-	client->inner.attributes |= NS_CLIENTATTR_RA;
+	client->inner.ra = true;
 
 	/*
 	 * Create a query context for a client sending the previously

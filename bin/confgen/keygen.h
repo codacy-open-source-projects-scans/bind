@@ -21,6 +21,10 @@
 #include <dns/secalg.h>
 
 void
+makesafe_keyname(const char *keyname, char *namebuf, size_t length,
+		 bool *wildcard);
+
+void
 generate_key(isc_mem_t *mctx, dns_secalg_t alg, int keysize,
 	     isc_buffer_t *key_txtbuffer);
 

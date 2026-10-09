@@ -139,8 +139,14 @@ configure_zone_acl(const cfg_obj_t *zconfig, const cfg_obj_t *vconfig,
 	if (config != NULL && maps[i] != NULL) {
 		const cfg_obj_t *toptions = named_zone_templateopts(config,
 								    maps[i]);
+		/* Check to see if ACL is defined within template */
 		if (toptions != NULL) {
 			maps[i++] = toptions;
+			(void)cfg_map_get(toptions, aclname, &aclobj);
+			if (aclobj != NULL) {
+				aclp = NULL;
+				goto parse_acl;
+			}
 		}
 	}
 
@@ -250,15 +256,14 @@ configure_zone_ssutable(const cfg_obj_t *zconfig, const cfg_obj_t *tconfig,
 		str = cfg_obj_asstring(identity);
 		isc_buffer_constinit(&b, str, strlen(str));
 		isc_buffer_add(&b, strlen(str));
-		result = dns_name_fromtext(dns_fixedname_name(&fident), &b,
-					   dns_rootname, 0);
+		result = dns_name_fromtext(dns_name(&fident), &b, dns_rootname,
+					   0);
 		if (result != ISC_R_SUCCESS) {
 			cfg_obj_log(identity, ISC_LOG_ERROR,
 				    "'%s' is not a valid name", str);
 			goto cleanup;
 		}
-		dns_name_format(dns_fixedname_name(&fident), namebuf,
-				sizeof(namebuf));
+		dns_name_format(&fident, namebuf, sizeof(namebuf));
 		isc_buffer_putstr(&dbuf, " ");
 		isc_buffer_putstr(&dbuf, namebuf);
 
@@ -275,20 +280,19 @@ configure_zone_ssutable(const cfg_obj_t *zconfig, const cfg_obj_t *tconfig,
 		dns_fixedname_init(&fname);
 		if (usezone) {
 			dns_name_copy(dns_zone_getorigin(zone),
-				      dns_fixedname_name(&fname));
+				      dns_name(&fname));
 		} else {
 			str = cfg_obj_asstring(dname);
 			isc_buffer_constinit(&b, str, strlen(str));
 			isc_buffer_add(&b, strlen(str));
-			result = dns_name_fromtext(dns_fixedname_name(&fname),
-						   &b, dns_rootname, 0);
+			result = dns_name_fromtext(dns_name(&fname), &b,
+						   dns_rootname, 0);
 			if (result != ISC_R_SUCCESS) {
 				cfg_obj_log(identity, ISC_LOG_ERROR,
 					    "'%s' is not a valid name", str);
 				goto cleanup;
 			}
-			dns_name_format(dns_fixedname_name(&fname), namebuf,
-					sizeof(namebuf));
+			dns_name_format(&fname, namebuf, sizeof(namebuf));
 			isc_buffer_putstr(&dbuf, " ");
 			isc_buffer_putstr(&dbuf, namebuf);
 		}
@@ -347,9 +351,9 @@ configure_zone_ssutable(const cfg_obj_t *zconfig, const cfg_obj_t *tconfig,
 		INSIST(i == n);
 
 		isc_buffer_putuint8(&dbuf, '\0');
-		dns_ssutable_addrule(table, grant, dns_fixedname_name(&fident),
-				     mtype, dns_fixedname_name(&fname), n,
-				     types, isc_buffer_base(&dbuf));
+		dns_ssutable_addrule(table, grant, dns_name(&fident), mtype,
+				     dns_name(&fname), n, types,
+				     isc_buffer_base(&dbuf));
 		if (types != NULL) {
 			isc_mem_cput(mctx, types, n, sizeof(*types));
 		}
@@ -818,6 +822,12 @@ isself(dns_view_t *myview, dns_tsigkey_t *mykey, const isc_sockaddr_t *srcaddr,
 	return false;
 }
 
+static const dns_zone_ops_t named_zone_ops = {
+	.isself = isself,
+	.plugins_free = ns_plugins_free,
+	.hooktable_free = ns_hooktable_free,
+};
+
 /*%
  * For mirror zones, change "notify yes;" to "notify explicit;", informing the
  * user only if "notify" was explicitly configured rather than inherited from
@@ -947,6 +957,12 @@ process_notify_cfg(const cfg_obj_t **maps, dns_zone_t *zone, dns_zone_t *raw) {
 	}
 
 	return ISC_R_SUCCESS;
+}
+
+static void
+detach_cfg(void *arg) {
+	cfg_obj_t *cfg = (cfg_obj_t *)arg;
+	cfg_obj_detach(&cfg);
 }
 
 isc_result_t
@@ -1355,7 +1371,8 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 		dns_zone_setoption(zone, DNS_ZONEOPT_NOTIFYTOSOA,
 				   cfg_obj_asboolean(obj));
 
-		dns_zone_setisself(zone, isself, NULL);
+		dns_zone_setops(zone, &named_zone_ops);
+		dns_zone_setisself(zone, true, NULL);
 
 		CHECK(configure_zone_acl(
 			zconfig, vconfig, config, allow_transfer, aclctx, zone,
@@ -1530,7 +1547,7 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 
 			CHECK(dns_name_fromstring(rad, adstr, dns_rootname, 0,
 						  mctx));
-			if (logreports || dns_name_equal(rad, dns_rootname)) {
+			if (logreports || dns_name_isroot(rad)) {
 				/* Disable RC for error-logging zones or root */
 				dns_zone_setrad(zone, NULL);
 			} else if (dns_name_equal(rad, zn)) {
@@ -1856,8 +1873,8 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 		obj = NULL;
 		(void)named_config_get(nooptions, "allow-transfer", &obj);
 		if (obj == NULL) {
-			dns_acl_t *none;
-			CHECK(dns_acl_none(mctx, &none));
+			dns_acl_t *none = NULL;
+			dns_acl_none(mctx, &none);
 			dns_zone_setxfracl(zone, none);
 			dns_acl_detach(&none);
 		}
@@ -1877,7 +1894,7 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 		 * explicitly specified and this is a root zone mirror.
 		 */
 		if (obj == NULL && ztype == dns_zone_mirror &&
-		    dns_name_equal(dns_zone_getorigin(zone), dns_rootname))
+		    dns_name_isroot(dns_zone_getorigin(zone)))
 		{
 			result = named_config_getremotesdef(
 				config, "remote-servers",
@@ -1978,6 +1995,11 @@ named_zone_configure(const cfg_obj_t *config, const cfg_obj_t *vconfig,
 	default:
 		break;
 	}
+
+	/* Save the configuration for later use */
+	cfg_obj_t *cfg = UNCONST(zconfig);
+	cfg_obj_ref(cfg);
+	dns_zone_setcfg(zone, (void *)cfg, detach_cfg);
 
 	result = ISC_R_SUCCESS;
 
@@ -2185,6 +2207,7 @@ named_zone_loadplugins(dns_zone_t *zone, const cfg_obj_t *config,
 	 * that's now obsolete.
 	 */
 	dns_zone_unloadplugins(zone);
+	dns_zone_setops(zone, &named_zone_ops);
 
 	/*
 	 * Load zone-specific plugin instances.
@@ -2205,11 +2228,10 @@ named_zone_loadplugins(dns_zone_t *zone, const cfg_obj_t *config,
 		isc_mem_t *zmctx = dns_zone_getmctx(zone);
 
 		ns_hooktable_create(zmctx, &hookdata.hooktable);
-		dns_zone_sethooktable(zone, hookdata.hooktable,
-				      ns_hooktable_free);
+		dns_zone_sethooktable(zone, hookdata.hooktable);
 
 		ns_plugins_create(zmctx, &hookdata.plugins);
-		dns_zone_setplugins(zone, hookdata.plugins, ns_plugins_free);
+		dns_zone_setplugins(zone, hookdata.plugins);
 
 		RETERR(cfg_pluginlist_foreach(config, tpluginlist, aclctx,
 					      named_register_one_plugin,

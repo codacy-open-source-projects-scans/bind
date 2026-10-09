@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -11,7 +11,7 @@
 
 import shutil
 
-from nsec3.common import NSEC3_MARK, check_nsec3_case
+from nsec3.common import NSEC3_MARK, check_nsec3_case, wait_for_nsec3param
 
 import isctest
 
@@ -50,6 +50,7 @@ def test_nsec3_case(ns3, default_algorithm):
 
     # First make sure the zone is properly signed.
     isctest.kasp.wait_keymgr_done(ns3, zone)
+    wait_for_nsec3param(ns3, zone, saltlen=0)
 
     # Test case.
     check_nsec3_case(ns3, params)

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -45,11 +45,12 @@ def test_expiredglue(ns4):
     isctest.check.same_data(res3_2, res3)
 
 
-def test_loopdetected(ns4):
+def test_missing_mandatory_glue(ns4):
     msg = isctest.query.create("a.missing.tld.", "A")
     with ns4.watch_log_from_here() as watcher:
         res = isctest.query.udp(msg, ns4.ip)
 
-        # However, this is a valid fetch loop, and named detects it.
-        watcher.wait_for_line("loop detected resolving 'ns.missing.tld/A'")
+        # The NS for missing.tld. is in-domain and has no glue, so
+        # named drops the delegation rather than chasing it.
+        watcher.wait_for_line("missing mandatory glue for ns.missing.tld")
         isctest.check.servfail(res)

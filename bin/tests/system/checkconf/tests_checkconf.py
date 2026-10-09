@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0.  If a copy of the MPL was not distributed with this
+# License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, you can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # See the COPYRIGHT file distributed with this work for additional
@@ -35,3 +35,18 @@ def test_checkconf_builtin():
     # builtin-trust-anchors is non documented and internal clause only, it must
     # not be visible.
     assert "builtin-trust-anchors" not in cmd.out
+
+
+# Because this is specifically testing an issue occuring in an included file,
+# the `bad-` pattern can't be used here.
+def test_checkconf_included_unexpectedeof():
+    cmd = isctest.run.cmd(
+        [os.environ["CHECKCONF"], "truncated-with-include.conf"],
+        raise_on_exception=False,
+    )
+
+    assert (
+        b"included-truncated.conf:1: unknown option 'b'\nincluded-truncated.conf:1: unexpected end of input \nincluded-truncated.conf:1: isc_symtab_define() failed \n"
+        == cmd.proc.stdout
+    )
+    assert cmd.proc.returncode != 0

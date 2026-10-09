@@ -14,6 +14,7 @@
 . ../conf.sh
 
 cp -f ns1/example1.db ns1/example.db
+cp -f ns1/grant-external.test.db.in ns1/grant-external.test.db
 sed 's/example.nil/other.nil/g' ns1/example1.db >ns1/other.db
 sed 's/example.nil/unixtime.nil/g' ns1/example1.db >ns1/unixtime.db
 sed 's/example.nil/yyyymmddvv.nil/g' ns1/example1.db >ns1/yyyymmddvv.db
@@ -35,6 +36,7 @@ update.nil              IN SOA  ns1.example.nil. hostmaster.example.nil. (
                                 3600       ; minimum (1 hour)
                                 )
 update.nil.             NS      ns1.update.nil.
+update.nil.             KX      0 .
 ns1.update.nil.         A       10.53.0.2
 ns2.update.nil.		AAAA	::1
 EOF

@@ -253,6 +253,18 @@ dns_private_chains(dns_db_t *db, dns_dbversion_t *ver,
 			    private.data[3] == 0 && private.data[4] == 0)
 			{
 				signing = true;
+			} else if (private.length == 7 &&
+				   private.data[0] != 0 &&
+				   private.data[3] == 0 && private.data[4] == 0)
+			{
+				dst_algorithm_t alg = private.data[6] |
+						      (private.data[5] << 8);
+
+				if (dst_algorithm_tosecalg(alg) ==
+				    private.data[0])
+				{
+					signing = true;
+				}
 			}
 		} else {
 			if (CREATE(rdata.data[1])) {
@@ -303,7 +315,7 @@ dns_private_totext(dns_rdata_t *private, isc_buffer_t *buf) {
 			CLEANUP(ISC_R_FAILURE);
 		}
 
-		CHECK(dns_rdata_tostruct(&rdata, &nsec3param, NULL));
+		CHECK(dns_rdata_tostruct(&rdata, &nsec3param));
 
 		del = ((nsec3param.flags & DNS_NSEC3FLAG_REMOVE) != 0);
 		init = ((nsec3param.flags & DNS_NSEC3FLAG_INITIAL) != 0);
@@ -378,7 +390,7 @@ dns_private_totext(dns_rdata_t *private, isc_buffer_t *buf) {
 			isc_buffer_putstr(buf, "Signing with ");
 		}
 
-		dns_secalg_format(alg, algbuf, sizeof(algbuf));
+		dst_algorithm_format(alg, algbuf, sizeof(algbuf));
 		snprintf(keybuf, sizeof(keybuf), "key %d/%s", keyid, algbuf);
 		isc_buffer_putstr(buf, keybuf);
 	} else {

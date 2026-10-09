@@ -13,7 +13,7 @@
 
 /*! \file
  * \brief
- * The built-in "version", "hostname", "id", "authors" and "empty" databases.
+ * The built-in "version", "hostname", "id", and "empty" databases.
  */
 
 #include <stdio.h>
@@ -21,10 +21,12 @@
 
 #include <isc/lex.h>
 #include <isc/mem.h>
+#include <isc/region.h>
 #include <isc/result.h>
 #include <isc/util.h>
 
 #include <dns/callbacks.h>
+#include <dns/db.h>
 #include <dns/dbiterator.h>
 #include <dns/rdatalist.h>
 #include <dns/rdatasetiter.h>
@@ -216,16 +218,19 @@ putsoa(bdbnode_t *node, const char *mname, const char *rname, uint32_t serial) {
 }
 
 static isc_result_t
-puttxt(bdbnode_t *node, const char *text) {
+puttxt(bdbnode_t *node, isc_region_t *r) {
 	unsigned char buf[256];
-	unsigned int len = strlen(text);
 
-	if (len > 255) {
-		len = 255; /* Silently truncate */
+	if (r == NULL || r->length == 0) {
+		return ISC_R_SUCCESS;
 	}
-	buf[0] = len;
-	memmove(&buf[1], text, len);
-	return putrdata(node, dns_rdatatype_txt, 0, buf, len + 1);
+
+	INSIST(r->base != NULL);
+
+	buf[0] = r->length > 255 ? 255 : r->length; /* Silently truncate */
+	memmove(&buf[1], r->base, buf[0]);
+
+	return putrdata(node, dns_rdatatype_txt, 0, buf, buf[0] + 1);
 }
 
 /*
@@ -499,77 +504,17 @@ builtin_authority(bdb_t *bdb, bdbnode_t *node) {
 
 static isc_result_t
 version_lookup(bdbnode_t *node) {
-	if (named_g_server->version_set) {
-		if (named_g_server->version == NULL) {
-			return ISC_R_SUCCESS;
-		} else {
-			return puttxt(node, named_g_server->version);
-		}
-	} else {
-		return puttxt(node, PACKAGE_VERSION);
-	}
+	return puttxt(node, &named_g_server->version);
 }
 
 static isc_result_t
 hostname_lookup(bdbnode_t *node) {
-	if (named_g_server->hostname_set) {
-		if (named_g_server->hostname == NULL) {
-			return ISC_R_SUCCESS;
-		} else {
-			return puttxt(node, named_g_server->hostname);
-		}
-	} else {
-		char buf[256];
-		if (gethostname(buf, sizeof(buf)) != 0) {
-			return ISC_R_FAILURE;
-		}
-		return puttxt(node, buf);
-	}
-}
-
-static isc_result_t
-authors_lookup(bdbnode_t *node) {
-	const char **p = NULL;
-	static const char *authors[] = {
-		"Mark Andrews",	      "Curtis Blackburn",
-		"James Brister",      "Ben Cottrell",
-		"John H. DuBois III", "Francis Dupont",
-		"Michael Graff",      "Andreas Gustafsson",
-		"Bob Halley",	      "Evan Hunt",
-		"JINMEI Tatuya",      "Witold Krecicki",
-		"David Lawrence",     "Scott Mann",
-		"Danny Mayer",	      "Aydin Mercan",
-		"Damien Neil",	      "Matt Nelson",
-		"Jeremy C. Reed",     "Michael Sawyer",
-		"Brian Wellington",   NULL
-	};
-
-	/*
-	 * If a version string is specified, disable the authors.bind zone.
-	 */
-	if (named_g_server->version_set) {
-		return ISC_R_SUCCESS;
-	}
-
-	for (p = authors; *p != NULL; p++) {
-		RETERR(puttxt(node, *p));
-	}
-	return ISC_R_SUCCESS;
+	return puttxt(node, &named_g_server->hostname);
 }
 
 static isc_result_t
 id_lookup(bdbnode_t *node) {
-	if (named_g_server->sctx->usehostname) {
-		char buf[256];
-		if (gethostname(buf, sizeof(buf)) != 0) {
-			return ISC_R_FAILURE;
-		}
-		return puttxt(node, buf);
-	} else if (named_g_server->sctx->server_id != NULL) {
-		return puttxt(node, named_g_server->sctx->server_id);
-	} else {
-		return ISC_R_SUCCESS;
-	}
+	return puttxt(node, &named_g_server->sctx->server_id);
 }
 
 static isc_result_t
@@ -855,12 +800,13 @@ findnode(dns_db_t *db, const dns_name_t *name, bool create,
 }
 
 static isc_result_t
-find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
-     dns_rdatatype_t type, unsigned int options, isc_stdtime_t now,
-     dns_dbnode_t **nodep, dns_name_t *foundname,
-     dns_clientinfomethods_t *methods ISC_ATTR_UNUSED,
-     dns_clientinfo_t *clientinfo ISC_ATTR_UNUSED, dns_rdataset_t *rdataset,
-     dns_rdataset_t *sigrdataset DNS__DB_FLARG) {
+builtin_find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
+	     dns_rdatatype_t type, unsigned int options, isc_stdtime_t now,
+	     dns_name_t *foundname,
+	     dns_clientinfomethods_t *methods ISC_ATTR_UNUSED,
+	     dns_clientinfo_t *clientinfo ISC_ATTR_UNUSED,
+	     dns_rdataset_t *rdataset,
+	     dns_rdataset_t *sigrdataset DNS__DB_FLARG) {
 	bdb_t *bdb = (bdb_t *)db;
 	isc_result_t result;
 	dns_dbnode_t *node = NULL;
@@ -871,7 +817,6 @@ find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
 	bool dns64;
 
 	REQUIRE(VALID_BDB(bdb));
-	REQUIRE(nodep == NULL || *nodep == NULL);
 	REQUIRE(version == NULL || version == (dns_dbversion_t *)&dummy);
 
 	if (!dns_name_issubdomain(name, &db->origin)) {
@@ -1005,9 +950,7 @@ find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
 		dns_name_copy(xname, foundname);
 	}
 
-	if (nodep != NULL) {
-		*nodep = node;
-	} else if (node != NULL) {
+	if (node != NULL) {
 		bdbnode_detachnode(&node DNS__DB_FLARG_PASS);
 	}
 
@@ -1090,6 +1033,27 @@ allrdatasets(dns_db_t *db, dns_dbnode_t *node, dns_dbversion_t *version,
 	return ISC_R_SUCCESS;
 }
 
+static void
+builtin_addglue(dns_db_t *db, dns_dbversion_t *version,
+		const dns_name_t *owner_name, dns_rdataset_t *rdataset,
+		dns_message_t *msg, dns_clientinfomethods_t *methods,
+		dns_clientinfo_t *clientinfo) {
+	bdb_t *bdb = (bdb_t *)db;
+
+	REQUIRE(VALID_BDB(bdb));
+	REQUIRE(version == NULL || version == (dns_dbversion_t *)&dummy);
+
+	/*
+	 * Builtin databases do not synthesize delegations, so there is no
+	 * glue.
+	 */
+	UNUSED(owner_name);
+	UNUSED(rdataset);
+	UNUSED(msg);
+	UNUSED(methods);
+	UNUSED(clientinfo);
+}
+
 static dns_dbmethods_t bdb_methods = {
 	.destroy = destroy,
 	.currentversion = currentversion,
@@ -1098,7 +1062,8 @@ static dns_dbmethods_t bdb_methods = {
 	.findrdataset = findrdataset,
 	.allrdatasets = allrdatasets,
 	.findnode = findnode,
-	.find = find,
+	.find = builtin_find,
+	.addglue = builtin_addglue,
 };
 
 static isc_result_t
@@ -1127,9 +1092,7 @@ create(isc_mem_t *mctx, const dns_name_t *origin, dns_dbtype_t type,
 	dns_name_dup(origin, mctx, &bdb->common.origin);
 
 	INSIST(argc >= 1);
-	if (strcmp(argv[0], "authors") == 0) {
-		bdb->lookup = authors_lookup;
-	} else if (strcmp(argv[0], "hostname") == 0) {
+	if (strcmp(argv[0], "hostname") == 0) {
 		bdb->lookup = hostname_lookup;
 	} else if (strcmp(argv[0], "id") == 0) {
 		bdb->lookup = id_lookup;

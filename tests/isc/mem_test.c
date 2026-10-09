@@ -125,6 +125,70 @@ ISC_RUN_TEST_IMPL(isc_mem_get) {
 	isc_mempool_destroy(&mp1);
 }
 
+/* aligned memory system tests */
+ISC_RUN_TEST_IMPL(isc_mem_get_align) {
+	isc_mem_t *mctx2 = NULL;
+	void *ptr;
+	size_t alignment;
+	uintptr_t aligned;
+
+	/* Check different alignment sizes up to the page size */
+	for (alignment = sizeof(void *); alignment <= 4096; alignment *= 2) {
+		size_t size = alignment / 2 - 1;
+		ptr = isc_mem_getx(isc_g_mctx, size, ISC_MEM_ALIGN(alignment));
+
+		/* Check if the pointer is properly aligned */
+		aligned = (((uintptr_t)ptr / alignment) * alignment);
+		assert_ptr_equal(aligned, (uintptr_t)ptr);
+
+		/* Check if we can resize to <alignment, 2*alignment> range */
+		ptr = isc_mem_regetx(isc_g_mctx, ptr, size,
+				     size * 2 + alignment,
+				     ISC_MEM_ALIGN(alignment));
+
+		/* Check if the pointer is still properly aligned */
+		aligned = (((uintptr_t)ptr / alignment) * alignment);
+		assert_ptr_equal(aligned, (uintptr_t)ptr);
+
+		isc_mem_putx(isc_g_mctx, ptr, size * 2 + alignment,
+			     ISC_MEM_ALIGN(alignment));
+
+		/* Check whether isc_mem_putanddetachx() also works */
+		isc_mem_create("mctx2", &mctx2);
+		ptr = isc_mem_getx(mctx2, size, ISC_MEM_ALIGN(alignment));
+		isc_mem_putanddetachx(&mctx2, ptr, size,
+				      ISC_MEM_ALIGN(alignment));
+	}
+}
+
+/* aligned memory system tests */
+ISC_RUN_TEST_IMPL(isc_mem_allocate_align) {
+	void *ptr;
+	size_t alignment;
+	uintptr_t aligned;
+
+	/* Check different alignment sizes up to the page size */
+	for (alignment = sizeof(void *); alignment <= 4096; alignment *= 2) {
+		size_t size = alignment / 2 - 1;
+		ptr = isc_mem_allocatex(isc_g_mctx, size,
+					ISC_MEM_ALIGN(alignment));
+
+		/* Check if the pointer is properly aligned */
+		aligned = (((uintptr_t)ptr / alignment) * alignment);
+		assert_ptr_equal(aligned, (uintptr_t)ptr);
+
+		/* Check if we can resize to <alignment, 2*alignment> range */
+		ptr = isc_mem_reallocatex(isc_g_mctx, ptr, size * 2 + alignment,
+					  ISC_MEM_ALIGN(alignment));
+
+		/* Check if the pointer is still properly aligned */
+		aligned = (((uintptr_t)ptr / alignment) * alignment);
+		assert_ptr_equal(aligned, (uintptr_t)ptr);
+
+		isc_mem_freex(isc_g_mctx, ptr, ISC_MEM_ALIGN(alignment));
+	}
+}
+
 /* zeroed memory system tests */
 ISC_RUN_TEST_IMPL(isc_mem_cget_zero) {
 	uint8_t *ptr;
@@ -291,6 +355,17 @@ ISC_RUN_TEST_IMPL(isc_mem_reallocate) {
 	isc_mem_free(isc_g_mctx, data);
 }
 
+static bool
+at_least_one_overmem(isc_mem_t *mctx) {
+	for (size_t i = 0; i < UINT16_MAX; i++) {
+		/* The overmem is probability based in this range */
+		if (isc_mem_isovermem(mctx)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 ISC_RUN_TEST_IMPL(isc_mem_overmem) {
 	isc_mem_t *mctx = NULL;
 	isc_mem_create("test", &mctx);
@@ -298,27 +373,27 @@ ISC_RUN_TEST_IMPL(isc_mem_overmem) {
 
 	isc_mem_setwater(mctx, 1024, 512);
 
-	/* inuse < lo_water */
+	/* inuse <= lo_water is always false */
 	void *data1 = isc_mem_allocate(mctx, 256);
 	assert_false(isc_mem_isovermem(mctx));
 
-	/* lo_water < inuse < hi_water */
+	/* lo_water < inuse < hi_water might be true or false */
 	void *data2 = isc_mem_allocate(mctx, 512);
-	assert_false(isc_mem_isovermem(mctx));
+	assert_true(at_least_one_overmem(mctx));
 
-	/* hi_water < inuse */
+	/* hi_water <= inuse is always true */
 	void *data3 = isc_mem_allocate(mctx, 512);
 	assert_true(isc_mem_isovermem(mctx));
 
-	/* lo_water < inuse < hi_water */
+	/* lo_water < inuse < hi_water might be true or false */
 	isc_mem_free(mctx, data2);
-	assert_true(isc_mem_isovermem(mctx));
+	assert_true(at_least_one_overmem(mctx));
 
-	/* inuse < lo_water */
+	/* inuse <= lo_water is always false */
 	isc_mem_free(mctx, data3);
 	assert_false(isc_mem_isovermem(mctx));
 
-	/* inuse == 0 */
+	/* inuse == 0 is always false */
 	isc_mem_free(mctx, data1);
 	assert_false(isc_mem_isovermem(mctx));
 
@@ -546,6 +621,8 @@ ISC_RUN_TEST_IMPL(isc_mem_benchmark) {
 ISC_TEST_LIST_START
 
 ISC_TEST_ENTRY(isc_mem_get)
+ISC_TEST_ENTRY(isc_mem_get_align)
+ISC_TEST_ENTRY(isc_mem_allocate_align)
 ISC_TEST_ENTRY(isc_mem_cget_zero)
 ISC_TEST_ENTRY(isc_mem_callocate_zero)
 ISC_TEST_ENTRY(isc_mem_inuse)

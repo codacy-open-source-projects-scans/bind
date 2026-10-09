@@ -141,6 +141,18 @@ dns_db_create(isc_mem_t *mctx, const char *db_type, const dns_name_t *origin,
 		fprintf(stderr, "dns_db_create:%s:%s:%d:%p->references = 1\n",
 			__func__, __FILE__, __LINE__ + 1, *dbp);
 #endif
+
+		if (result == ISC_R_SUCCESS && type != dns_dbtype_cache &&
+		    (*dbp)->methods->addglue == NULL)
+		{
+			isc_log_write(DNS_LOGCATEGORY_DATABASE,
+				      DNS_LOGMODULE_DB, ISC_LOG_ERROR,
+				      "database type '%s' does not implement "
+				      "required addglue method",
+				      db_type);
+			dns_db_detach(dbp);
+			result = ISC_R_NOTIMPLEMENTED;
+		}
 		return result;
 	}
 
@@ -498,9 +510,8 @@ dns__db_findnsec3node(dns_db_t *db, const dns_name_t *name, bool create,
 isc_result_t
 dns__db_find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
 	     dns_rdatatype_t type, unsigned int options, isc_stdtime_t now,
-	     dns_dbnode_t **nodep, dns_name_t *foundname,
-	     dns_clientinfomethods_t *methods, dns_clientinfo_t *clientinfo,
-	     dns_rdataset_t *rdataset,
+	     dns_name_t *foundname, dns_clientinfomethods_t *methods,
+	     dns_clientinfo_t *clientinfo, dns_rdataset_t *rdataset,
 	     dns_rdataset_t *sigrdataset DNS__DB_FLARG) {
 	/*
 	 * Find the best match for 'name' and 'type' in version 'version'
@@ -509,7 +520,6 @@ dns__db_find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
 
 	REQUIRE(DNS_DB_VALID(db));
 	REQUIRE(type != dns_rdatatype_rrsig);
-	REQUIRE(nodep == NULL || *nodep == NULL);
 	REQUIRE(dns_name_hasbuffer(foundname));
 	REQUIRE(rdataset == NULL || (DNS_RDATASET_VALID(rdataset) &&
 				     !dns_rdataset_isassociated(rdataset)));
@@ -519,8 +529,8 @@ dns__db_find(dns_db_t *db, const dns_name_t *name, dns_dbversion_t *version,
 
 	if (db->methods->find != NULL) {
 		return (db->methods->find)(db, name, version, type, options,
-					   now, nodep, foundname, methods,
-					   clientinfo, rdataset,
+					   now, foundname, methods, clientinfo,
+					   rdataset,
 					   sigrdataset DNS__DB_FLARG_PASS);
 	}
 	return ISC_R_NOTIMPLEMENTED;
@@ -1043,23 +1053,20 @@ dns_db_setgluecachestats(dns_db_t *db, isc_stats_t *stats) {
 	return ISC_R_NOTIMPLEMENTED;
 }
 
-isc_result_t
+void
 dns_db_addglue(dns_db_t *db, dns_dbversion_t *version,
 	       const dns_name_t *owner_name, dns_rdataset_t *rdataset,
-	       dns_message_t *msg) {
+	       dns_message_t *msg, dns_clientinfomethods_t *methods,
+	       dns_clientinfo_t *clientinfo) {
 	REQUIRE(DNS_DB_VALID(db));
 	REQUIRE((db->attributes & DNS_DBATTR_CACHE) == 0);
 	REQUIRE(DNS_RDATASET_VALID(rdataset));
 	REQUIRE(rdataset->methods != NULL);
 	REQUIRE(rdataset->type == dns_rdatatype_ns);
+	REQUIRE(db->methods->addglue != NULL);
 
-	if (db->methods->addglue != NULL) {
-		(db->methods->addglue)(db, version, owner_name, rdataset, msg);
-
-		return ISC_R_SUCCESS;
-	}
-
-	return ISC_R_NOTIMPLEMENTED;
+	(db->methods->addglue)(db, version, owner_name, rdataset, msg, methods,
+			       clientinfo);
 }
 
 void
@@ -1067,14 +1074,6 @@ dns_db_expiredata(dns_dbnode_t *node, void *data) {
 	REQUIRE(node != NULL && node->methods != NULL);
 	if (node->methods->expiredata != NULL) {
 		(node->methods->expiredata)(node, data);
-	}
-}
-
-void
-dns_db_deletedata(dns_dbnode_t *node, void *data) {
-	REQUIRE(node != NULL && node->methods != NULL);
-	if (node->methods->deletedata != NULL) {
-		(node->methods->deletedata)(node, data);
 	}
 }
 

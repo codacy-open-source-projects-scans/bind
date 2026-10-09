@@ -1036,6 +1036,10 @@ dns_dt_parse(isc_mem_t *mctx, isc_region_t *src, dns_dtdata_t **destp) {
 
 	m = frame->message;
 
+	if (m == NULL) {
+		CLEANUP(DNS_R_BADDNSTAP);
+	}
+
 	/* Message type */
 	switch (m->type) {
 	case DNSTAP__MESSAGE__TYPE__AUTH_QUERY:
@@ -1114,11 +1118,19 @@ dns_dt_parse(isc_mem_t *mctx, isc_region_t *src, dns_dtdata_t **destp) {
 	/* Timestamp */
 	if (d->query) {
 		if (m->has_query_time_sec && m->has_query_time_nsec) {
+			if (m->query_time_nsec >= NS_PER_SEC) {
+				CLEANUP(DNS_R_BADDNSTAP);
+			}
+
 			isc_time_set(&d->qtime, m->query_time_sec,
 				     m->query_time_nsec);
 		}
 	} else {
 		if (m->has_response_time_sec && m->has_response_time_nsec) {
+			if (m->response_time_nsec >= NS_PER_SEC) {
+				CLEANUP(DNS_R_BADDNSTAP);
+			}
+
 			isc_time_set(&d->rtime, m->response_time_sec,
 				     m->response_time_nsec);
 		}
@@ -1173,7 +1185,7 @@ dns_dt_parse(isc_mem_t *mctx, isc_region_t *src, dns_dtdata_t **destp) {
 
 	/* Query tuple */
 	if (d->msg != NULL) {
-		dns_name_t *name = NULL;
+		dns_linkedname_t *name = NULL;
 		dns_rdataset_t *rdataset;
 
 		CHECK(dns_message_firstname(d->msg, DNS_SECTION_QUESTION));
