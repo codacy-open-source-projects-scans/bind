@@ -32,6 +32,7 @@
 #include <isc/lib.h>
 #include <isc/log.h>
 #include <isc/mem.h>
+#include <isc/parseint.h>
 #include <isc/result.h>
 #include <isc/serial.h>
 #include <isc/string.h>
@@ -479,7 +480,7 @@ match_key_dsset(keyinfo_t *ki, dns_rdataset_t *dsset, strictness_t strictness) {
 		if (result != ISC_R_SUCCESS) {
 			vbprintf(3,
 				 "dns_ds_buildrdata("
-				 "keytag=%d, algo=%d, digest=%d): %s\n",
+				 "keytag=%hu, algo=%d, digest=%d): %s\n",
 				 ds.key_tag, ds.algorithm, ds.digest_type,
 				 isc_result_totext(result));
 			continue;
@@ -488,13 +489,13 @@ match_key_dsset(keyinfo_t *ki, dns_rdataset_t *dsset, strictness_t strictness) {
 		c = dsrdata.type != dns_rdatatype_ds;
 		dsrdata.type = dns_rdatatype_ds;
 		if (dns_rdata_compare(&dsrdata, &newdsrdata) == 0) {
-			vbprintf(1, "found matching %s %d %d %d\n",
+			vbprintf(1, "found matching %s %hu %d %d\n",
 				 c ? "CDS" : "DS", ds.key_tag, ds.algorithm,
 				 ds.digest_type);
 			return true;
 		} else if (strictness == TIGHT) {
 			vbprintf(0,
-				 "key does not match %s %d %d %d "
+				 "key does not match %s %hu %d %d "
 				 "when it looks like it should\n",
 				 c ? "CDS" : "DS", ds.key_tag, ds.algorithm,
 				 ds.digest_type);
@@ -502,7 +503,7 @@ match_key_dsset(keyinfo_t *ki, dns_rdataset_t *dsset, strictness_t strictness) {
 		}
 	}
 
-	vbprintf(1, "no matching %s for %s %d %d\n",
+	vbprintf(1, "no matching %s for %s %hu %d\n",
 		 dsset->type == dns_rdatatype_cds ? "CDS" : "DS",
 		 ki->rdata.type == dns_rdatatype_cdnskey ? "CDNSKEY" : "DNSKEY",
 		 ki->tag, ki->algo);
@@ -555,7 +556,7 @@ match_keyset_dsset(dns_rdataset_t *keyset, dns_rdataset_t *dsset,
 		if (result != ISC_R_SUCCESS) {
 			vbprintf(3,
 				 "dns_dnssec_keyfromrdata("
-				 "keytag=%d, algo=%d): %s\n",
+				 "keytag=%hu, algo=%d): %s\n",
 				 ki->tag, ki->algo, isc_result_totext(result));
 		}
 		ki++;
@@ -614,7 +615,7 @@ matching_sigs(keyinfo_t *keytbl, dns_rdataset_t *rdataset,
 		 * Replay attack protection: check against current age limit
 		 */
 		if (isc_serial_lt(sig.timesigned, notbefore)) {
-			vbprintf(1, "skip RRSIG by key %d: too old\n",
+			vbprintf(1, "skip RRSIG by key %hu: too old\n",
 				 sig.keyid);
 			continue;
 		}
@@ -628,7 +629,7 @@ matching_sigs(keyinfo_t *keytbl, dns_rdataset_t *rdataset,
 			}
 			if (ki->dst == NULL) {
 				vbprintf(1,
-					 "skip RRSIG by key %d:"
+					 "skip RRSIG by key %hu:"
 					 " no matching (C)DS\n",
 					 sig.keyid);
 				continue;
@@ -642,13 +643,13 @@ matching_sigs(keyinfo_t *keytbl, dns_rdataset_t *rdataset,
 			    result != DNS_R_FROMWILDCARD)
 			{
 				vbprintf(1,
-					 "skip RRSIG by key %d:"
+					 "skip RRSIG by key %hu:"
 					 " verification failed: %s\n",
 					 sig.keyid, isc_result_totext(result));
 				continue;
 			}
 
-			vbprintf(1, "found RRSIG by key %d\n", ki->tag);
+			vbprintf(1, "found RRSIG by key %hu\n", ki->tag);
 			algo[i] = sig.algorithm;
 
 			/*
@@ -715,7 +716,7 @@ signed_strict(dns_rdataset_t *dsset, dns_secalg_t *algo) {
 		if (!ds_ok) {
 			vbprintf(0,
 				 "missing signature for algorithm %d "
-				 "(key %d)\n",
+				 "(key %hu)\n",
 				 ds.algorithm, ds.key_tag);
 			all_ok = false;
 		}
@@ -1063,8 +1064,8 @@ main(int argc, char *argv[]) {
 	bool prefer_cdnskey = false;
 	bool nsupdate = false;
 	uint32_t ttl = 0;
+	isc_result_t result;
 	int ch;
-	char *endp;
 
 	setfatalcallback(cleanup);
 
@@ -1122,8 +1123,9 @@ main(int argc, char *argv[]) {
 			version(isc_commandline_progname);
 			break;
 		case 'v':
-			verbose = strtoul(isc_commandline_argument, &endp, 0);
-			if (*endp != '\0') {
+			result = isc_parse_signed_number(
+				&verbose, isc_commandline_argument, 0);
+			if (result != ISC_R_SUCCESS) {
 				fatal("-v must be followed by a number");
 			}
 			break;
@@ -1234,7 +1236,8 @@ main(int argc, char *argv[]) {
 		dns_rdatatype_format(oldestsig.covered, type, sizeof(type));
 		verbose_time(1, "child signature inception time",
 			     oldestsig.timesigned);
-		vbprintf(2, "from RRSIG %s by key %d\n", type, oldestsig.keyid);
+		vbprintf(2, "from RRSIG %s by key %hu\n", type,
+			 oldestsig.keyid);
 	}
 
 	/*
